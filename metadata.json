@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "Puskesdoc Generator",
+  "description": "Generator Dokumen Akreditasi Puskesmas ILP Klaster 1-5 dengan AI Gemini, Visual Drag & Drop Canvas, Variabel Dinamis, dan Ekspor Word & PDF.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

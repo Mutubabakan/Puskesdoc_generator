@@ -1,0 +1,361 @@
+import {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  AlignmentType,
+  WidthType,
+  BorderStyle,
+} from 'docx';
+import { PuskesDoc, FaskesProfile } from '../types';
+
+export async function exportToDocx(doc: PuskesDoc, profile: FaskesProfile): Promise<void> {
+  const sections: any[] = [];
+
+  // 1. KOP SURAT (if useKop is true)
+  if (doc.useKop) {
+    sections.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 40 },
+        children: [
+          new TextRun({
+            text: profile.pemerintahDaerah.toUpperCase(),
+            font: 'Arial',
+            size: 24, // 12pt
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 40 },
+        children: [
+          new TextRun({
+            text: profile.dinasKesehatan.toUpperCase(),
+            font: 'Arial',
+            size: 26, // 13pt
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 60 },
+        children: [
+          new TextRun({
+            text: profile.namaPuskesmas.toUpperCase(),
+            font: 'Arial',
+            size: 30, // 15pt
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 120 },
+        children: [
+          new TextRun({
+            text: `${profile.alamat} Telp: ${profile.telepon} Email: ${profile.email}`,
+            font: 'Arial',
+            size: 18, // 9pt
+            italics: true,
+          }),
+        ],
+      }),
+      // Divider line
+      new Paragraph({
+        border: {
+          bottom: {
+            color: '000000',
+            space: 1,
+            style: BorderStyle.DOUBLE,
+            size: 12,
+          },
+        },
+        spacing: { after: 200 },
+      })
+    );
+  }
+
+  // 2. DOCUMENT SPECIFIC HEADER
+  if (doc.docType === 'SOP') {
+    // Official Kemenkes SOP Header Table
+    const sopTable = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { before: 100, after: 100 },
+                  children: [
+                    new TextRun({
+                      text: doc.title.toUpperCase(),
+                      font: 'Arial',
+                      bold: true,
+                      size: 24,
+                    }),
+                  ],
+                }),
+              ],
+            }),
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: [
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `No. Dokumen : ${doc.sopMetadata?.noDokumen || doc.docNumber || '-'}`, font: 'Arial', size: 18 }),
+                  ],
+                }),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `No. Revisi   : ${doc.sopMetadata?.noRevisi || '00'}`, font: 'Arial', size: 18 }),
+                  ],
+                }),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `SOP`, font: 'Arial', bold: true, size: 20 }),
+                  ],
+                }),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `Tanggal Terbit : ${doc.sopMetadata?.tanggalTerbit || new Date().toLocaleDateString('id-ID')}`, font: 'Arial', size: 18 }),
+                  ],
+                }),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `Halaman      : ${doc.sopMetadata?.halaman || '1/2'}`, font: 'Arial', size: 18 }),
+                  ],
+                }),
+              ],
+            }),
+          ],
+        }),
+        new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { before: 80, after: 80 },
+                  children: [
+                    new TextRun({ text: profile.namaPuskesmas.toUpperCase(), font: 'Arial', bold: true, size: 20 }),
+                  ],
+                }),
+              ],
+            }),
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: [
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `Ditetapkan Oleh : ${profile.jabatanKepala}`, font: 'Arial', bold: true, size: 18 }),
+                  ],
+                }),
+                new Paragraph({
+                  spacing: { before: 200 },
+                  children: [
+                    new TextRun({ text: profile.kepalaPuskesmas, font: 'Arial', bold: true, underline: {}, size: 20 }),
+                  ],
+                }),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: `NIP. ${profile.nipKepala}`, font: 'Arial', size: 18 }),
+                  ],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    sections.push(sopTable);
+    sections.push(new Paragraph({ spacing: { after: 200 } }));
+  } else if (doc.docType === 'SK') {
+    sections.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 60 },
+        children: [
+          new TextRun({ text: `KEPUTUSAN KEPALA ${profile.namaPuskesmas.toUpperCase()}`, font: 'Arial', bold: true, size: 24 }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 60 },
+        children: [
+          new TextRun({ text: `NOMOR : ${doc.docNumber || '440/001/SK/PKM/2026'}`, font: 'Arial', bold: true, size: 22 }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 140 },
+        children: [
+          new TextRun({ text: `TENTANG`, font: 'Arial', bold: true, size: 22 }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+        children: [
+          new TextRun({ text: doc.title.toUpperCase(), font: 'Arial', bold: true, size: 24 }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+        children: [
+          new TextRun({ text: `DENGAN RAHMAT TUHAN YANG MAHA ESA\nKEPALA ${profile.namaPuskesmas.toUpperCase()},`, font: 'Arial', bold: true, size: 22 }),
+        ],
+      })
+    );
+  } else {
+    // KAK, Pedoman, Panduan, Custom
+    sections.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 80 },
+        children: [
+          new TextRun({ text: doc.docType === 'KAK' ? 'KERANGKA ACUAN KERJA (KAK)' : doc.title.toUpperCase(), font: 'Arial', bold: true, size: 26 }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 180 },
+        children: [
+          new TextRun({ text: doc.title.toUpperCase(), font: 'Arial', bold: true, size: 22 }),
+        ],
+      })
+    );
+  }
+
+  // 3. BODY SECTIONS
+  doc.sections.forEach((sec, idx) => {
+    sections.push(
+      new Paragraph({
+        spacing: { before: 140, after: 60 },
+        children: [
+          new TextRun({
+            text: sec.title.match(/^\d+|^[A-Z]\./) ? sec.title : `${idx + 1}. ${sec.title}`,
+            font: 'Arial',
+            bold: true,
+            size: 22,
+          }),
+        ],
+      })
+    );
+
+    const paragraphs = sec.content.split('\n');
+    paragraphs.forEach((p) => {
+      if (p.trim().length > 0) {
+        sections.push(
+          new Paragraph({
+            spacing: { after: 60 },
+            alignment: AlignmentType.JUSTIFIED,
+            children: [
+              new TextRun({
+                text: p,
+                font: 'Arial',
+                size: 22,
+              }),
+            ],
+          })
+        );
+      }
+    });
+  });
+
+  // 4. SIGNATURE FOOTER (for SK, KAK, etc.)
+  if (doc.docType !== 'SOP') {
+    sections.push(
+      new Paragraph({ spacing: { before: 300 } }),
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: {
+          top: { style: BorderStyle.NONE },
+          bottom: { style: BorderStyle.NONE },
+          left: { style: BorderStyle.NONE },
+          right: { style: BorderStyle.NONE },
+          insideHorizontal: { style: BorderStyle.NONE },
+          insideVertical: { style: BorderStyle.NONE },
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({ width: { size: 50, type: WidthType.PERCENTAGE }, children: [new Paragraph({})] }),
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                children: [
+                  new Paragraph({
+                    children: [
+                      new TextRun({ text: `Ditetapkan di : ${profile.kabupatenKota}`, font: 'Arial', size: 20 }),
+                    ],
+                  }),
+                  new Paragraph({
+                    children: [
+                      new TextRun({ text: `Pada tanggal  : ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`, font: 'Arial', size: 20 }),
+                    ],
+                  }),
+                  new Paragraph({
+                    spacing: { before: 60, after: 200 },
+                    children: [
+                      new TextRun({ text: `${profile.jabatanKepala.toUpperCase()},`, font: 'Arial', bold: true, size: 20 }),
+                    ],
+                  }),
+                  new Paragraph({
+                    children: [
+                      new TextRun({ text: profile.kepalaPuskesmas, font: 'Arial', bold: true, underline: {}, size: 20 }),
+                    ],
+                  }),
+                  new Paragraph({
+                    children: [
+                      new TextRun({ text: `NIP. ${profile.nipKepala}`, font: 'Arial', size: 18 }),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      })
+    );
+  }
+
+  // Create Document
+  const wordDoc = new Document({
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: {
+              top: 1440, // 1 inch
+              right: 1440,
+              bottom: 1440,
+              left: 1440,
+            },
+          },
+        },
+        children: sections,
+      },
+    ],
+  });
+
+  const blob = await Packer.toBlob(wordDoc);
+  const fileName = `${doc.docType}_${doc.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40)}.docx`;
+
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}

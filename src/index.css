@@ -1,1 +1,156 @@
 @import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    background-color: #f8fafc;
+    color: #1e293b;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Holographic silver with purple and pink accents */
+.holo-gradient {
+  background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 25%, #ede9fe 50%, #fce7f3 75%, #f8fafc 100%);
+}
+
+.holo-card {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(203, 213, 225, 0.7);
+  box-shadow: 0 4px 20px -2px rgba(139, 92, 246, 0.08), 0 2px 6px -1px rgba(236, 72, 153, 0.05);
+}
+
+.holo-glow {
+  box-shadow: 0 0 15px rgba(168, 85, 247, 0.25), 0 0 30px rgba(236, 72, 153, 0.15);
+}
+
+.holo-border {
+  border-image: linear-gradient(to right, #94a3b8, #a855f7, #ec4899, #94a3b8) 1;
+}
+
+/* A4 Paper Dimensions & Print Styling */
+@media print {
+  body {
+    background: transparent !important;
+    color: #000 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .a4-page {
+    box-shadow: none !important;
+    margin: 0 !important;
+    padding: 20mm !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: auto !important;
+    page-break-after: always;
+  }
+  @page {
+    size: A4;
+    margin: 15mm;
+  }
+}
+
+/* Authentic Word / DOCX Content Styling */
+.docx-document-content {
+  font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+  color: #0f172a;
+  line-height: 1.5;
+  outline: none;
+  word-break: break-word;
+}
+
+/* Support for docx-preview generated wrapper and sections */
+.docx-document-content .docx-wrapper {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.docx-document-content section.docx {
+  box-shadow: none !important;
+  margin: 0 0 2rem 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  width: 100% !important;
+  min-height: auto !important;
+}
+
+.docx-document-content section.docx + section.docx {
+  padding-top: 2rem !important;
+  border-top: 2px dashed #cbd5e1 !important;
+}
+
+.docx-document-content table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 0.85rem 0 !important;
+  border: 1.5px solid #1e293b !important;
+}
+
+.docx-document-content th,
+.docx-document-content td {
+  border: 1px solid #334155 !important;
+  padding: 6px 10px !important;
+  vertical-align: top !important;
+  font-size: 0.85rem !important;
+}
+
+.docx-document-content tr:first-child th,
+.docx-document-content tr:first-child td {
+  background-color: #f8fafc;
+}
+
+.docx-document-content h1 {
+  font-size: 1.35rem;
+  font-weight: 800;
+  margin: 1rem 0 0.5rem;
+  text-align: center;
+}
+
+.docx-document-content h2 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin: 0.85rem 0 0.4rem;
+}
+
+.docx-document-content h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0.75rem 0 0.35rem;
+}
+
+.docx-document-content p {
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  text-align: justify;
+}
+
+.docx-document-content ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.docx-document-content ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.docx-document-content img {
+  max-width: 100%;
+  height: auto;
+  margin: 0.5rem auto;
+  display: block;
+}
+
+.docx-document-content:focus {
+  outline: none;
+}

@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile document",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "FaskesProfile": {
+      "title": "FaskesProfile",
+      "description": "Data master profil Puskesmas dan pejabat",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "namaPuskesmas": { "type": "string" },
+        "kodeFaskes": { "type": "string" },
+        "dinasKesehatan": { "type": "string" },
+        "pemerintahDaerah": { "type": "string" },
+        "alamat": { "type": "string" },
+        "telepon": { "type": "string" },
+        "email": { "type": "string" },
+        "kepalaPuskesmas": { "type": "string" },
+        "nipKepala": { "type": "string" },
+        "jabatanKepala": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "namaPuskesmas"]
+    },
+    "PuskesDoc": {
+      "title": "PuskesDoc",
+      "description": "Dokumen akreditasi Puskesmas (SOP, SK, KAK, Pedoman, Panduan, Custom)",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "docType": { "type": "string" },
+        "klaster": { "type": "string" },
+        "docNumber": { "type": "string" },
+        "useKop": { "type": "boolean" },
+        "sections": { "type": "array" },
+        "sopMetadata": { "type": "object" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "title", "docType", "klaster"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "User" },
+      "description": "Profil pengguna terdaftar"
+    },
+    "/faskes_profiles/{profileId}": {
+      "schema": { "$ref": "FaskesProfile" },
+      "description": "Profil master Puskesmas milik pengguna"
+    },
+    "/documents/{documentId}": {
+      "schema": { "$ref": "PuskesDoc" },
+      "description": "Daftar dokumen akreditasi yang tersimpan di cloud"
+    }
+  }
+}

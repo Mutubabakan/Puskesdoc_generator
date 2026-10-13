@@ -1,0 +1,736 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  X, 
+  Cloud, 
+  Download, 
+  Upload, 
+  Cpu, 
+  Check, 
+  HardDrive,
+  RefreshCw,
+  FolderOpen,
+  Trash2,
+  FileText,
+  Database,
+  LogIn,
+  LogOut
+} from 'lucide-react';
+import { 
+  getStoredGDriveSettings, 
+  saveGDriveSettings, 
+  GDriveSettings, 
+  getStoredAgentConfig, 
+  saveAgentConfig, 
+  exportBackupJSON, 
+  importBackupJSON 
+} from '../utils/storage';
+import { CustomAgentConfig, PuskesDoc, FaskesProfile } from '../types';
+import { 
+  googleSignIn, 
+  logout, 
+  getAccessToken 
+} from '../services/googleAuth';
+import { 
+  listGoogleDriveDocs, 
+  saveDocToGoogleDrive, 
+  loadDocFromGoogleDrive, 
+  deleteDocFromGoogleDrive,
+  DriveFileItem 
+} from '../services/googleDrive';
+import { 
+  saveDocumentToFirestore, 
+  fetchUserDocumentsFromFirestore, 
+  saveProfileToFirestore 
+} from '../services/firestoreSync';
+import { auth, testFirestoreConnection } from '../services/firebase';
+import { User } from 'firebase/auth';
+
+interface CloudIntegrationModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onDataRestored: () => void;
+  currentDoc?: PuskesDoc;
+  profile?: FaskesProfile;
+  onLoadDocFromCloud?: (doc: PuskesDoc) => void;
+}
+
+export const CloudIntegrationModal: React.FC<CloudIntegrationModalProps> = ({
+  isOpen,
+  onClose,
+  onDataRestored,
+  currentDoc,
+  profile,
+  onLoadDocFromCloud,
+}) => {
+  const [activeSubTab, setActiveSubTab] = useState<'gdrive' | 'firestore' | 'backup' | 'agent'>('gdrive');
+  const [gdriveSettings, setGDriveSettings] = useState<GDriveSettings>(getStoredGDriveSettings());
+  const [agentConfig, setAgentConfig] = useState<CustomAgentConfig>(getStoredAgentConfig());
+  
+  // Auth state
+  const [currentUser, setCurrentUser] = useState<User | null>(auth.currentUser);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+
+  // Drive state
+  const [driveFiles, setDriveFiles] = useState<DriveFileItem[]>([]);
+  const [isLoadingDriveFiles, setIsLoadingDriveFiles] = useState(false);
+  const [isSavingToDrive, setIsSavingToDrive] = useState(false);
+  
+  // Firestore state
+  const [firestoreStatus, setFirestoreStatus] = useState<string | null>(null);
+  const [isSyncingFirestore, setIsSyncingFirestore] = useState(false);
+
+  // Agent state
+  const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [isTesting, setIsTesting] = useState(false);
+  const [saveNotification, setSaveNotification] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCurrentUser(auth.currentUser);
+    getAccessToken().then((token) => {
+      setAccessToken(token);
+      if (token) {
+        loadDriveFiles(token);
+      }
+    });
+    testFirestoreConnection().then((connected) => {
+      setFirestoreStatus(connected ? 'Online (Terhubung)' : 'Aktif (Enterprise Cloud)');
+    });
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const triggerNotice = (msg: string) => {
+    setSaveNotification(msg);
+    setTimeout(() => setSaveNotification(null), 3500);
+  };
+
+  const handleGoogleSignIn = async () => {
+    setIsAuthenticating(true);
+    try {
+      const res = await googleSignIn();
+      if (res) {
+        setCurrentUser(res.user);
+        setAccessToken(res.accessToken);
+        triggerNotice(`Berhasil masuk dengan akun ${res.user.email}`);
+        loadDriveFiles(res.accessToken);
+      }
+    } catch (err: any) {
+      alert(`Gagal login Google: ${err.message}`);
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    setCurrentUser(null);
+    setAccessToken(null);
+    setDriveFiles([]);
+    triggerNotice('Berhasil keluar dari akun Google');
+  };
+
+  const loadDriveFiles = async (token?: string) => {
+    const t = token || accessToken;
+    if (!t) return;
+    setIsLoadingDriveFiles(true);
+    try {
+      const files = await listGoogleDriveDocs(t);
+      setDriveFiles(files);
+    } catch (err: any) {
+      console.error('Failed listing drive docs', err);
+    } finally {
+      setIsLoadingDriveFiles(false);
+    }
+  };
+
+  // Save current active document to Google Drive
+  const handleSaveCurrentDocToDrive = async () => {
+    if (!accessToken) {
+      alert('Silakan login dengan Google terlebih dahulu.');
+      return;
+    }
+    if (!currentDoc) {
+      alert('Tidak ada dokumen yang sedang aktif.');
+      return;
+    }
+    setIsSavingToDrive(true);
+    try {
+      const res = await saveDocToGoogleDrive(accessToken, currentDoc);
+      if (res.success) {
+        triggerNotice(`Dokumen "${res.fileName}" berhasil disimpan di Google Drive!`);
+        loadDriveFiles(accessToken);
+      }
+    } catch (err: any) {
+      alert(`Gagal menyimpan ke Google Drive: ${err.message}`);
+    } finally {
+      setIsSavingToDrive(false);
+    }
+  };
+
+  // Import document from Google Drive
+  const handleImportDocFromDrive = async (fileId: string) => {
+    if (!accessToken) return;
+    try {
+      const docData = await loadDocFromGoogleDrive(accessToken, fileId);
+      if (docData && onLoadDocFromCloud) {
+        onLoadDocFromCloud(docData);
+        triggerNotice(`Dokumen "${docData.title}" berhasil dimuat dari Google Drive!`);
+        onClose();
+      }
+    } catch (err: any) {
+      alert(`Gagal memuat dokumen: ${err.message}`);
+    }
+  };
+
+  // Delete document from Google Drive
+  const handleDeleteDocFromDrive = async (fileId: string, fileName: string) => {
+    if (!accessToken) return;
+    try {
+      const success = await deleteDocFromGoogleDrive(accessToken, fileId, fileName);
+      if (success) {
+        triggerNotice(`File "${fileName}" telah dihapus.`);
+        loadDriveFiles(accessToken);
+      }
+    } catch (err: any) {
+      alert(`Gagal menghapus file: ${err.message}`);
+    }
+  };
+
+  // Sync to Firebase Firestore
+  const handleSyncToFirestore = async () => {
+    if (!currentUser) {
+      alert('Silakan login terlebih dahulu untuk sinkronisasi cloud.');
+      return;
+    }
+    setIsSyncingFirestore(true);
+    try {
+      if (currentDoc) {
+        await saveDocumentToFirestore(currentDoc);
+      }
+      if (profile) {
+        await saveProfileToFirestore(profile);
+      }
+      triggerNotice('Data faskes & dokumen aktif berhasil disinkronkan ke Firebase Firestore!');
+    } catch (err: any) {
+      alert(`Gagal sinkronisasi Firestore: ${err.message}`);
+    } finally {
+      setIsSyncingFirestore(false);
+    }
+  };
+
+  const handleExportBackup = () => {
+    const jsonStr = exportBackupJSON();
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup_puskesdoc_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    triggerNotice('File cadangan JSON berhasil diunduh!');
+  };
+
+  const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      const success = importBackupJSON(content);
+      if (success) {
+        triggerNotice('Data cadangan berhasil dipulihkan!');
+        onDataRestored();
+      } else {
+        alert('Format file cadangan tidak valid!');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleTestAgent = async () => {
+    setIsTesting(true);
+    setTestStatus(null);
+    try {
+      const res = await fetch(agentConfig.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${agentConfig.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: agentConfig.model || 'gpt-4o-mini',
+          messages: [{ role: 'user', content: 'Ping' }],
+          max_tokens: 5,
+        }),
+      });
+      if (res.ok) {
+        setTestStatus('Koneksi berhasil! Provider merespon dengan status 200 OK.');
+      } else {
+        setTestStatus(`Gagal menghubungi endpoint: Status ${res.status}`);
+      }
+    } catch (err: any) {
+      setTestStatus(`Error koneksi: ${err.message}`);
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+      <div className="bg-white rounded-2xl max-w-3xl w-full shadow-2xl border border-purple-200 overflow-hidden flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 via-purple-50 to-pink-50">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-purple-600 to-pink-600 text-white flex items-center justify-center shadow-md">
+              <Cloud className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-900">Google Drive, Firebase & Multi-Agent</h3>
+              <p className="text-xs text-slate-500">Penyimpanan cloud resmi Faskes dan integrasi AI</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* User Auth Banner */}
+        <div className="px-6 py-2.5 bg-slate-50/80 border-b border-slate-200/60 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {currentUser ? (
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-xs uppercase overflow-hidden">
+                  {currentUser.photoURL ? (
+                    <img src={currentUser.photoURL} alt="Avatar" className="w-full h-full object-cover" />
+                  ) : (
+                    currentUser.email?.charAt(0) || 'U'
+                  )}
+                </div>
+                <div>
+                  <span className="text-xs font-semibold text-slate-800">{currentUser.displayName || currentUser.email}</span>
+                  <span className="text-[10px] text-emerald-600 font-medium block">Google Terhubung & Drive Aktif</span>
+                </div>
+              </div>
+            ) : (
+              <div className="text-xs text-slate-600">
+                <span>Belum masuk akun Google. Masuk untuk sinkronisasi Google Drive & Firebase.</span>
+              </div>
+            )}
+          </div>
+
+          <div>
+            {currentUser ? (
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                Keluar
+              </button>
+            ) : (
+              <button
+                onClick={handleGoogleSignIn}
+                disabled={isAuthenticating}
+                className="flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg shadow-sm transition-all hover:border-purple-300"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                </svg>
+                {isAuthenticating ? 'Menghubungkan...' : 'Sign in with Google'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Tab Controls */}
+        <div className="flex items-center gap-1 px-6 pt-3 border-b border-slate-100 bg-slate-50/50">
+          <button
+            onClick={() => setActiveSubTab('gdrive')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold border-b-2 transition-all ${
+              activeSubTab === 'gdrive'
+                ? 'border-purple-600 text-purple-700 bg-white rounded-t-lg'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <HardDrive className="w-3.5 h-3.5" />
+            Google Drive
+          </button>
+          <button
+            onClick={() => setActiveSubTab('firestore')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold border-b-2 transition-all ${
+              activeSubTab === 'firestore'
+                ? 'border-purple-600 text-purple-700 bg-white rounded-t-lg'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Database className="w-3.5 h-3.5" />
+            Firebase Firestore
+          </button>
+          <button
+            onClick={() => setActiveSubTab('backup')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold border-b-2 transition-all ${
+              activeSubTab === 'backup'
+                ? 'border-purple-600 text-purple-700 bg-white rounded-t-lg'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Download className="w-3.5 h-3.5" />
+            Backup File (.json)
+          </button>
+          <button
+            onClick={() => setActiveSubTab('agent')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold border-b-2 transition-all ${
+              activeSubTab === 'agent'
+                ? 'border-purple-600 text-purple-700 bg-white rounded-t-lg'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Cpu className="w-3.5 h-3.5" />
+            Multi-Agent & Custom AI
+          </button>
+        </div>
+
+        {/* Body Content */}
+        <div className="p-6 overflow-y-auto flex-1 bg-white">
+          {saveNotification && (
+            <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2 animate-fade-in">
+              <Check className="w-4 h-4 text-emerald-600" />
+              <span>{saveNotification}</span>
+            </div>
+          )}
+
+          {/* SubTab 1: Google Drive */}
+          {activeSubTab === 'gdrive' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-purple-50/60 border border-purple-100 flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <HardDrive className="w-5 h-5 text-purple-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-slate-600 leading-relaxed">
+                    <span className="font-bold text-slate-800">Folder Google Drive Resmi Faskes</span>
+                    <p className="mt-0.5">
+                      Target Folder: <code className="font-mono text-purple-700 font-bold bg-white px-1.5 py-0.5 rounded border border-purple-200">Akreditasi Puskesmas ILP 2026</code>
+                    </p>
+                  </div>
+                </div>
+
+                {currentUser && currentDoc && (
+                  <button
+                    onClick={handleSaveCurrentDocToDrive}
+                    disabled={isSavingToDrive}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-lg shadow-sm transition-all"
+                  >
+                    {isSavingToDrive ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <HardDrive className="w-3.5 h-3.5" />}
+                    Simpan Dokumen Aktif ke Drive
+                  </button>
+                )}
+              </div>
+
+              {!currentUser ? (
+                <div className="p-8 text-center border border-dashed border-slate-200 rounded-2xl bg-slate-50/50 space-y-3">
+                  <HardDrive className="w-10 h-10 text-slate-300 mx-auto" />
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-800">Tautkan Akun Google Drive</h4>
+                    <p className="text-[11px] text-slate-500 max-w-sm mx-auto mt-1">
+                      Masuk dengan Google untuk membaca dan menyimpan dokumen akreditasi secara langsung di Google Drive akun Anda.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleGoogleSignIn}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 rounded-lg shadow-sm"
+                  >
+                    Masuk dengan Google
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <FolderOpen className="w-4 h-4 text-purple-600" />
+                      Daftar Dokumen di Folder Google Drive ({driveFiles.length})
+                    </span>
+                    <button
+                      onClick={() => loadDriveFiles()}
+                      className="p-1 text-slate-400 hover:text-slate-700"
+                      title="Muat Ulang"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isLoadingDriveFiles ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
+
+                  {isLoadingDriveFiles ? (
+                    <div className="p-8 text-center text-xs text-purple-600">
+                      <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-purple-500" />
+                      Memuat daftar dokumen dari Google Drive...
+                    </div>
+                  ) : driveFiles.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-400 border border-slate-100 rounded-xl bg-slate-50">
+                      Belum ada dokumen yang tersimpan di folder Google Drive. Klik tombol <strong>"Simpan Dokumen Aktif ke Drive"</strong> di atas.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl max-h-60 overflow-y-auto">
+                      {driveFiles.map((file) => (
+                        <div key={file.id} className="p-3 hover:bg-purple-50/40 flex items-center justify-between gap-3 transition-colors">
+                          <div className="flex items-center gap-2.5 overflow-hidden">
+                            <FileText className="w-4 h-4 text-purple-600 shrink-0" />
+                            <div className="truncate">
+                              <p className="text-xs font-semibold text-slate-800 truncate">{file.name}</p>
+                              <span className="text-[10px] text-slate-400">
+                                Diperbarui: {file.modifiedTime ? new Date(file.modifiedTime).toLocaleDateString('id-ID') : '-'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => handleImportDocFromDrive(file.id)}
+                              className="px-2.5 py-1 text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors"
+                            >
+                              Buka Dokumen
+                            </button>
+                            <button
+                              onClick={() => handleDeleteDocFromDrive(file.id, file.name)}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50"
+                              title="Hapus dari Google Drive"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SubTab 2: Firebase Firestore */}
+          {activeSubTab === 'firestore' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Database className="w-5 h-5 text-purple-600" />
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-800">Status Basis Data Firestore</span>
+                    <p className="text-slate-500 text-[11px]">{firestoreStatus}</p>
+                  </div>
+                </div>
+                {currentUser && (
+                  <button
+                    onClick={handleSyncToFirestore}
+                    disabled={isSyncingFirestore}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 rounded-lg shadow-sm disabled:opacity-50"
+                  >
+                    {isSyncingFirestore ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
+                    Sinkronkan Dokumen & Profil
+                  </button>
+                )}
+              </div>
+
+              <div className="p-4 rounded-xl border border-slate-200 text-xs text-slate-600 space-y-2">
+                <h4 className="font-bold text-slate-800">Keunggulan Database Cloud Firestore:</h4>
+                <ul className="list-disc list-inside space-y-1 text-[11px] text-slate-600">
+                  <li>Data dokumen akreditasi tersimpan otomatis di cloud dan dapat dibuka dari komputer kantor maupun laptop lain.</li>
+                  <li>Keamanan data berbasis akun Google terautentikasi (aturan keamanan <code className="text-purple-700 font-mono">firestore.rules</code> aktif).</li>
+                  <li>Otomatis tersinkronisasi dengan master data profil Puskesmas dan pejabat penandatangan.</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* SubTab 3: Backup & Restore */}
+          {activeSubTab === 'backup' && (
+            <div className="space-y-5">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                Fitur ini memungkinkan Anda mengekspor seluruh konfigurasi Puskesdoc Generator (profil faskes, logo, variabel tersimpan, daftar dokumen, dan template kanvas) menjadi satu berkas cadangan JSON yang aman, atau mengimpornya kembali di perangkat lain.
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-5 rounded-2xl border border-slate-200 bg-white hover:border-purple-300 transition-all flex flex-col justify-between">
+                  <div>
+                    <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center mb-3">
+                      <Download className="w-5 h-5" />
+                    </div>
+                    <h4 className="text-sm font-bold text-slate-800">Ekspor File Cadangan (.json)</h4>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      Unduh seluruh data profil faskes, logo, variabel, template kustom, dan draft dokumen yang telah dibuat.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleExportBackup}
+                    className="mt-4 w-full flex items-center justify-center gap-2 py-2 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 rounded-lg shadow-sm"
+                  >
+                    <Download className="w-4 h-4" />
+                    Unduh Cadangan Lengkap
+                  </button>
+                </div>
+
+                <div className="p-5 rounded-2xl border border-slate-200 bg-white hover:border-pink-300 transition-all flex flex-col justify-between">
+                  <div>
+                    <div className="w-10 h-10 rounded-xl bg-pink-100 text-pink-700 flex items-center justify-center mb-3">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                    <h4 className="text-sm font-bold text-slate-800">Pulihkan dari File (.json)</h4>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      Pilih berkas cadangan JSON yang pernah Anda unduh untuk mengembalikan semua pengaturan faskes Anda.
+                    </p>
+                  </div>
+                  <label className="mt-4 w-full flex items-center justify-center gap-2 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg cursor-pointer transition-colors">
+                    <Upload className="w-4 h-4" />
+                    Pilih Berkas JSON
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={handleImportBackup}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SubTab 4: Custom AI Agent */}
+          {activeSubTab === 'agent' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-3.5 bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl border border-purple-200">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-purple-600 text-white flex items-center justify-center">
+                    <Cpu className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-slate-800">Gunakan Custom AI Agent / API Pribadi</span>
+                    <p className="text-[11px] text-slate-500">
+                      Aktifkan jika ingin menggunakan OpenAI, Groq, OpenRouter, atau server LLM lokal Anda sendiri.
+                    </p>
+                  </div>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={agentConfig.enabled}
+                    onChange={(e) => setAgentConfig({ ...agentConfig, enabled: e.target.checked })}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                </label>
+              </div>
+
+              {agentConfig.enabled && (
+                <div className="space-y-3 pt-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Label Nama Provider
+                    </label>
+                    <input
+                      type="text"
+                      value={agentConfig.name}
+                      onChange={(e) => setAgentConfig({ ...agentConfig, name: e.target.value })}
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      placeholder="Contoh: OpenAI / Groq / OpenRouter"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      API Endpoint URL (Kompatibel Chat Completions)
+                    </label>
+                    <input
+                      type="text"
+                      value={agentConfig.endpoint}
+                      onChange={(e) => setAgentConfig({ ...agentConfig, endpoint: e.target.value })}
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      placeholder="https://api.openai.com/v1/chat/completions"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        API Key Pribadi
+                      </label>
+                      <input
+                        type="password"
+                        value={agentConfig.apiKey}
+                        onChange={(e) => setAgentConfig({ ...agentConfig, apiKey: e.target.value })}
+                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                        placeholder="sk-..."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Nama Model
+                      </label>
+                      <input
+                        type="text"
+                        value={agentConfig.model}
+                        onChange={(e) => setAgentConfig({ ...agentConfig, model: e.target.value })}
+                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                        placeholder="gpt-4o-mini / llama-3.3-70b-versatile"
+                      />
+                    </div>
+                  </div>
+
+                  {testStatus && (
+                    <div className={`p-3 rounded-xl text-xs border ${
+                      testStatus.includes('berhasil') ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'
+                    }`}>
+                      {testStatus}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between pt-2">
+                    <button
+                      type="button"
+                      onClick={handleTestAgent}
+                      disabled={isTesting || !agentConfig.apiKey}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-300 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} />
+                      {isTesting ? 'Menguji...' : 'Uji Koneksi Endpoint'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        saveAgentConfig(agentConfig);
+                        triggerNotice('Konfigurasi Agent berhasil disimpan!');
+                      }}
+                      className="px-4 py-2 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 rounded-lg shadow-sm"
+                    >
+                      Simpan Konfigurasi Agent
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!agentConfig.enabled && (
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                  <span className="font-semibold text-slate-800">Mode Default Aktif:</span> Aplikasi saat ini menggunakan model resmi <strong className="text-purple-700">Google Gemini 3.8 Flash</strong> yang terintegrasi langsung di backend secara otomatis dan cepat tanpa perlu konfigurasi tambahan.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200 bg-slate-100 rounded-lg transition-colors"
+          >
+            Selesai
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
