@@ -344,6 +344,93 @@ Kembalikan respon JSON terstruktur:
   }
 });
 
+// API: AI Analyze & Convert Document into Structured Puskesmas Database Item
+app.post('/api/ai-analyze-database-document', async (req, res) => {
+  try {
+    const { documentText, customPrompt, currentData, customAgentConfig } = req.body;
+    if (!documentText && !currentData) {
+      return res.status(400).json({ success: false, error: 'Teks dokumen atau data yang akan dianalisis tidak boleh kosong' });
+    }
+
+    const promptText = `Anda adalah Ahli Analisis Data Kesehatan & Manajemen Mutu Puskesmas ILP (Integrasi Layanan Primer) Kemenkes RI.
+Tugas Anda adalah membaca dan menganalisis teks dokumen laporan, tabel capaian, notulen, atau data faskes di bawah ini, kemudian mengekstrak atau menyempurnakannya menjadi data terstruktur format Database Puskesmas.
+
+DOKUMEN SUMBER / TEKS CAPAIAN:
+"""
+${(documentText || '').slice(0, 30000)}
+"""
+
+${currentData ? `DATA DRAFT SAAT INI (YANG INGIN DISEMPURNAKAN):\n${JSON.stringify(currentData, null, 2)}\n` : ''}
+
+${customPrompt ? `INSTRUKSI KHUSUS / PERINTAH PROMPT PENGGUNA:\n"${customPrompt}"\nPerhatikan instruksi di atas secara saksama dalam menyusun judul, kategori, metrik, maupun rekomendasi!\n` : ''}
+
+Format respon yang diharapkan:
+Kembalikan respon JSON murni (JSON parsable) dengan struktur:
+{
+  "title": "Judul Laporan / Data Capaian (misal: Capaian SPM Kesehatan Ibu dan Anak 2025)",
+  "category": "Salah satu dari: 'spm' | 'indikator_mutu' | 'capaian_program' | 'demografi_sasaran' | 'sdmk_ketenagaan' | 'sarpras_alkes' | 'surveilans_penyakit' | 'kinerja_keuangan' | 'kustom'",
+  "period": "Periode data (misal: 'Tahun 2025', 'Semester II 2025', dll)",
+  "klaster": "Salah satu dari: 'KLASTER_1' | 'KLASTER_2' | 'KLASTER_3' | 'KLASTER_4' | 'LINTAS_KLASTER'",
+  "summary": "Ringkasan narasi yang informatif dan padat mengenai fakta data ini (2-4 kalimat)",
+  "metrics": [
+    {
+      "key": "Nama Indikator / Butir Capaian",
+      "value": "Nilai capaian ril (misal: 89.4%, 14 orang, 24,500 jiwa)",
+      "target": "Nilai target jika ada (misal: 100%, 12)",
+      "unit": "Satuan (misal: %, jiwa, orang, unit)",
+      "status": "tercapai | belum_tercapai | dalam_pantauan"
+    }
+  ],
+  "notes": "Catatan analisis kendala di lapangan dan rekomendasi rencana tindak lanjut (RTL)"
+}`;
+
+    // Custom Agent check
+    if (customAgentConfig && customAgentConfig.enabled && customAgentConfig.endpoint && customAgentConfig.apiKey) {
+      try {
+        const response = await fetch(customAgentConfig.endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${customAgentConfig.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: customAgentConfig.model || 'gpt-4o-mini',
+            messages: [
+              { role: 'system', content: ILP_SYSTEM_INSTRUCTION },
+              { role: 'user', content: promptText },
+            ],
+            temperature: 0.3,
+          }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const reply = data.choices?.[0]?.message?.content || '';
+          const cleanedJson = reply.replace(/```json/g, '').replace(/```/g, '').trim();
+          return res.json({ success: true, data: JSON.parse(cleanedJson), provider: 'custom' });
+        }
+      } catch (err: any) {
+        console.warn('Custom agent error for db analysis, falling back to Gemini:', err.message);
+      }
+    }
+
+    const geminiResponse = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: promptText,
+      config: {
+        systemInstruction: ILP_SYSTEM_INSTRUCTION,
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const text = geminiResponse.text || '{}';
+    const parsedData = JSON.parse(text);
+    return res.json({ success: true, data: parsedData, provider: 'gemini' });
+  } catch (error: any) {
+    console.error('Error analyzing database document:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Gagal menganalisis dokumen database dengan AI' });
+  }
+});
+
 // API: Analyze Custom Document Type Structure
 app.post('/api/analyze-doctype', async (req, res) => {
   try {

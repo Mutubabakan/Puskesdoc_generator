@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Sparkles, 
   Printer, 
@@ -6,7 +6,6 @@ import {
   Copy, 
   Check, 
   Save, 
-  RotateCcw, 
   Eye, 
   Plus, 
   Trash2, 
@@ -24,7 +23,13 @@ import {
   Layers,
   FileCheck,
   Variable,
-  Database
+  Database,
+  History,
+  Clock,
+  Square,
+  Bot,
+  CheckCircle2,
+  HelpCircle
 } from 'lucide-react';
 import { extractTextFromDocx, extractDocxAsHtml } from '../utils/docxReader';
 import { 
@@ -36,12 +41,29 @@ import {
   CustomDocTypeDefinition,
   DocumentSection,
   DocumentTemplate,
-  PuskesmasDatabaseItem
+  PuskesmasDatabaseItem,
+  CustomAgentConfig
 } from '../types';
 import { ILP_KLASTERS } from '../utils/constants';
-import { substituteVariables, saveDocument, getStoredAgentConfig, getStoredDocumentTemplates, getStoredDatabase } from '../utils/storage';
+import { 
+  substituteVariables, 
+  saveDocument, 
+  getStoredAgentConfig, 
+  saveAgentConfig,
+  getStoredUserAccount,
+  UserAccount,
+  getStoredDocumentTemplates, 
+  getStoredDatabase,
+  getStoredMedia,
+  getStoredDocHistory,
+  saveDocHistoryItem,
+  clearDocHistory,
+  DocHistoryItem
+} from '../utils/storage';
 import { exportToDocx } from '../utils/docxExport';
 import { generateStructuredPrompt } from '../utils/promptGenerator';
+import { GeneratedPreviewModal } from './GeneratedPreviewModal';
+import { TutorialModal } from './TutorialModal';
 
 interface GeneratorViewProps {
   profile: FaskesProfile;
@@ -97,20 +119,44 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(currentDoc.id || 'tab_1');
 
-  // Preview page selection: 'all' or specific page number (1, 2, 3...)
-  const [selectedPreviewPage, setSelectedPreviewPage] = useState<'all' | number>('all');
+  // Preview page selection: DEFAULT to single page 1 with navigation
+  const [selectedPreviewPage, setSelectedPreviewPage] = useState<number>(1);
 
+  // Paper Size & Margin States
+  const [paperSize, setPaperSize] = useState<'A4' | 'F4' | 'Letter'>('A4');
+  const [marginPreset, setMarginPreset] = useState<'2,2,2,2' | '4,3,3,3' | 'custom'>('2,2,2,2');
+  const [customMargin, setCustomMargin] = useState({ top: 2, left: 2, right: 2, bottom: 2 });
+
+  // User Account & AI Agent Selection State (Default: Google Gemini 2.5 Flash tied to email)
+  const [userAccount, setUserAccount] = useState<UserAccount>(getStoredUserAccount());
+  const [selectedAgent, setSelectedAgent] = useState<'gemini' | 'custom'>('gemini');
+  const [customAgentState, setCustomAgentState] = useState<CustomAgentConfig>(getStoredAgentConfig());
+
+  // Tutorial Modal State
+  const [isTutorialOpen, setIsTutorialOpen] = useState(false);
+
+  // AI Generation, Progress Bar, & AbortController State
   const [isGenerating, setIsGenerating] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressStepText, setProgressStepText] = useState('Menghubungkan ke AI...');
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
-  const [showResolvedValues, setShowResolvedValues] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const [storedTemplates, setStoredTemplates] = useState<DocumentTemplate[]>(getStoredDocumentTemplates());
   const [kopLogoError, setKopLogoError] = useState(false);
   const [executingBracketIdx, setExecutingBracketIdx] = useState<number | null>(null);
-  const [isExecutingAllBrackets, setIsExecutingAllBrackets] = useState(false);
 
-  // Variable autocomplete state when typing {{ or {{}} anywhere
+  // Popup Preview Modal for AI Generated Document
+  const [generatedPreviewDoc, setGeneratedPreviewDoc] = useState<PuskesDoc | null>(null);
+  const [isGeneratedPreviewModalOpen, setIsGeneratedPreviewModalOpen] = useState(false);
+
+  // Document History Log Modal
+  const [isDocHistoryModalOpen, setIsDocHistoryModalOpen] = useState(false);
+  const [docHistoryList, setDocHistoryList] = useState<DocHistoryItem[]>(getStoredDocHistory());
+
+  // Variable autocomplete state when typing {{ or {{}}
   const [autocomplete, setAutocomplete] = useState<{
     isOpen: boolean;
     query: string;
@@ -146,6 +192,11 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
     fieldId: string,
     sectionIdx?: number
   ) => {
+    // CRITICAL: Do NOT reset selectedIndex on Arrow/Enter keys to prevent jump back to top!
+    if ('key' in e && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape')) {
+      return;
+    }
+
     const target = e.currentTarget;
     const value = target.value;
     const cursor = target.selectionStart || 0;
@@ -162,12 +213,10 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
       matchLen = matchEndsWith[0].length;
       isMatch = true;
     } else if (textBefore.endsWith('{{}}')) {
-      // 2. Direct {{}} typed
       query = '';
       matchLen = 4;
       isMatch = true;
     } else {
-      // 3. Or last {{ was within 35 characters
       const lastOpen = textBefore.lastIndexOf('{{');
       if (lastOpen !== -1 && (cursor - lastOpen) <= 35) {
         const slice = textBefore.slice(lastOpen + 2);
@@ -185,7 +234,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
 
     if (isMatch) {
       const rect = target.getBoundingClientRect();
-      setAutocomplete({
+      setAutocomplete((prev) => ({
         isOpen: true,
         query,
         fieldId,
@@ -195,8 +244,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
           top: rect.bottom,
           left: Math.max(16, rect.left),
         },
-        selectedIndex: 0,
-      });
+        selectedIndex: prev.query === query && prev.isOpen ? prev.selectedIndex : 0,
+      }));
     } else {
       if (autocomplete.isOpen) {
         setAutocomplete((prev) => ({ ...prev, isOpen: false }));
@@ -287,22 +336,94 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
   const activeDoc = activeTab.doc;
 
-  const [activeKlasterInfo, setActiveKlasterInfo] = useState(
-    ILP_KLASTERS.find((k) => k.id === activeDoc.klaster) || ILP_KLASTERS[0]
-  );
+  // Active Klaster with Custom Support
+  const activeKlasterInfo = useMemo(() => {
+    if (activeDoc.klaster === 'KUSTOM') {
+      return {
+        id: 'KUSTOM' as IlpKlaster,
+        number: '*',
+        name: activeDoc.customKlasterName || 'Klaster Kustom / Manual',
+        description: 'Klaster yang ditentukan secara khusus oleh Puskesmas',
+        examples: [],
+      };
+    }
+    return ILP_KLASTERS.find((k) => k.id === activeDoc.klaster) || ILP_KLASTERS[0];
+  }, [activeDoc.klaster, activeDoc.customKlasterName]);
+
+  // Duplicate Title Warning against Media Library & Generation History
+  const duplicateTitleWarning = useMemo(() => {
+    const currentTitle = (activeDoc.title || '').trim().toLowerCase();
+    if (!currentTitle || currentTitle.length < 4) return null;
+
+    // Check History
+    const history = docHistoryList;
+    const histMatch = history.find((h) => h.title.trim().toLowerCase() === currentTitle);
+    if (histMatch) {
+      return {
+        type: 'history',
+        message: `Judul ini pernah digenerate sebelumnya pada ${new Date(histMatch.generatedAt).toLocaleDateString('id-ID')} (${histMatch.docType})`,
+        item: histMatch,
+      };
+    }
+
+    // Check Media
+    const media = getStoredMedia();
+    const mediaMatch = media.find((m) => 
+      m.name.toLowerCase().includes(currentTitle) || 
+      (m.description && m.description.toLowerCase().includes(currentTitle))
+    );
+    if (mediaMatch) {
+      return {
+        type: 'media',
+        message: `Judul ini mirip dengan berkas di Pustaka Media: "${mediaMatch.name}"`,
+        item: mediaMatch,
+      };
+    }
+
+    return null;
+  }, [activeDoc.title, docHistoryList]);
 
   useEffect(() => {
     setStoredTemplates(getStoredDocumentTemplates());
+    setUserAccount(getStoredUserAccount());
+    setCustomAgentState(getStoredAgentConfig());
   }, []);
-
-  useEffect(() => {
-    const found = ILP_KLASTERS.find((k) => k.id === activeDoc.klaster);
-    if (found) setActiveKlasterInfo(found);
-  }, [activeDoc.klaster]);
 
   const triggerNotice = (msg: string) => {
     setSuccessNotice(msg);
-    setTimeout(() => setSuccessNotice(null), 3000);
+    setTimeout(() => setSuccessNotice(null), 3500);
+  };
+
+  // Active Margins computation (in cm)
+  const activeMargins = useMemo(() => {
+    if (marginPreset === '2,2,2,2') {
+      return { top: 2, left: 2, right: 2, bottom: 2 };
+    }
+    if (marginPreset === '4,3,3,3') {
+      return { top: 4, left: 3, right: 3, bottom: 3 };
+    }
+    return customMargin;
+  }, [marginPreset, customMargin]);
+
+  // Paper Dimensions computation
+  const paperDimensions = useMemo(() => {
+    switch (paperSize) {
+      case 'F4':
+        return { maxWidth: '812px', minHeight: '1247px', label: 'F4 / Folio (215 x 330 mm)' };
+      case 'Letter':
+        return { maxWidth: '816px', minHeight: '1056px', label: 'Letter (216 x 279 mm)' };
+      case 'A4':
+      default:
+        return { maxWidth: '794px', minHeight: '1123px', label: 'A4 (210 x 297 mm)' };
+    }
+  }, [paperSize]);
+
+  // Save Custom Agent Config
+  const handleSaveCustomAgent = () => {
+    const updated = { ...customAgentState, enabled: true };
+    setCustomAgentState(updated);
+    saveAgentConfig(updated);
+    triggerNotice('Konfigurasi Custom AI Agent berhasil disimpan!');
   };
 
   // Helper to update active tab state & sync with setCurrentDoc
@@ -319,194 +440,173 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
         return t;
       })
     );
+    if (updatedDoc) {
+      setCurrentDoc(updatedDoc);
+    }
   };
 
-  // Add new tab in Generator
+  // Add new blank generator tab
   const handleAddNewTab = () => {
     const newId = 'tab_' + Date.now();
     const newDoc: PuskesDoc = {
-      id: 'doc_' + Date.now(),
-      title: `Dokumen Akreditasi Baru ${tabs.length + 1}`,
+      id: newId,
+      title: 'Dokumen Standar Akreditasi Puskesmas',
       docType: 'SOP',
       klaster: 'KLASTER_1',
-      docNumber: `440/${String(tabs.length + 1).padStart(3, '0')}/SOP/PKM/2026`,
+      docNumber: '440/001/SOP/PKM/2026',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       useKop: true,
-      targetPages: 2,
-      sopMetadata: {
-        noDokumen: `440/${String(tabs.length + 1).padStart(3, '0')}/SOP/PKM/2026`,
-        noRevisi: '00',
-        tanggalTerbit: new Date().toLocaleDateString('id-ID'),
-        halaman: '1/2',
-        unitTerkait: 'Klaster 1 Manajemen',
-        penanggungJawab: profile.kepalaPuskesmas || 'Kepala Puskesmas',
-      },
+      kopMode: 'manual',
+      showPageNumber: true,
+      pageNumberPosition: 'bottom-right',
       sections: [
-        { id: 'sec_1', title: '1. Pengertian', content: 'Uraian definisi operasional naskah dinas akreditasi...' },
-        { id: 'sec_2', title: '2. Tujuan', content: 'Sebagai acuan penerapan langkah-langkah kerja petugas...' },
-        { id: 'sec_3', title: '3. Kebijakan', content: 'Surat Keputusan Kepala {{nama_puskesmas}}...' },
-        { id: 'sec_4', title: '4. Referensi', content: 'Kepmenkes HK.01.07/MENKES/2015/2023 tentang Juknis Integrasi Pelayanan Kesehatan Primer' },
-        { id: 'sec_5', title: '5. Prosedur / Langkah-Langkah', content: '1. Petugas melakukan persiapan alat dan formulir.\n2. Petugas memverifikasi identitas pasien.\n3. Petugas memberikan pelayanan terstandar.' },
-        { id: 'sec_6', title: '6. Diagram Alir', content: 'Persiapan -> Verifikasi -> Pelayanan -> Pencatatan' },
-        { id: 'sec_7', title: '7. Unit Terkait', content: 'Seluruh unit dan klaster pelayanan terkait' },
-        { id: 'sec_8', title: '8. Rekaman Historis Perubahan', content: 'No | Yang Diubah | Isi Perubahan | Tgl Diberlakukan\n1. | Dokumen Baru | Format Standar ILP | 2026' },
+        { id: 'sec_1', title: '1. Pengertian', content: 'Pelayanan di {{nama_puskesmas}}...' },
+        { id: 'sec_2', title: '2. Tujuan', content: 'Sebagai acuan penerapan langkah-langkah...' },
+        { id: 'sec_3', title: '3. Kebijakan', content: 'SK Kepala Puskesmas...' },
+        { id: 'sec_4', title: '4. Referensi', content: 'Kepmenkes Juknis ILP 2023...' },
+        { id: 'sec_5', title: '5. Prosedur', content: '1. Petugas menyiapkan...\n2. Petugas melakukan...' },
+        { id: 'sec_6', title: '6. Diagram Alir', content: 'Alur kerja...' },
+        { id: 'sec_7', title: '7. Unit Terkait', content: 'Klaster Manajemen...' },
+        { id: 'sec_8', title: '8. Rekaman Historis Perubahan', content: 'Dokumen Baru Standar ILP' },
       ],
     };
 
-    const newTabItem: GeneratorTabItem = {
+    const newTab: GeneratorTabItem = {
       id: newId,
-      title: newDoc.title,
+      title: 'Dokumen Baru',
       doc: newDoc,
       contextInput: '',
       customInstructions: '',
       targetPages: 2,
     };
 
-    setTabs([...tabs, newTabItem]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newId);
+    setSelectedPreviewPage(1);
     setCurrentDoc(newDoc);
-    triggerNotice('Tab generator baru berhasil dibuka!');
   };
 
-  // Close a tab
+  // Close tab
   const handleCloseTab = (tabIdToClose: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length <= 1) {
-      triggerNotice('Minimal harus ada 1 tab generator aktif.');
+      triggerNotice('Minimal harus ada 1 tab dokumen aktif.');
       return;
     }
-
     const filtered = tabs.filter((t) => t.id !== tabIdToClose);
     setTabs(filtered);
-
     if (activeTabId === tabIdToClose) {
-      const nextTab = filtered[0];
-      setActiveTabId(nextTab.id);
-      setCurrentDoc(nextTab.doc);
-    }
-    triggerNotice('Tab generator ditutup.');
-  };
-
-  // Switch tab
-  const handleSelectTab = (tabId: string) => {
-    setActiveTabId(tabId);
-    const target = tabs.find((t) => t.id === tabId);
-    if (target) {
-      setCurrentDoc(target.doc);
+      const nextActive = filtered[0];
+      setActiveTabId(nextActive.id);
+      setSelectedPreviewPage(1);
+      setCurrentDoc(nextActive.doc);
     }
   };
 
-  // Apply template from library
-  const handleApplyTemplateById = (templateId: string) => {
-    const tpl = storedTemplates.find((t) => t.id === templateId);
-    if (!tpl) return;
-    const isStandardType = ['SOP', 'SK', 'KAK', 'PEDOMAN', 'PANDUAN'].includes(tpl.docType);
-    const targetP = tpl.pageCount || activeTab.targetPages || 2;
-    const newDoc: PuskesDoc = {
-      ...activeDoc,
-      title: tpl.name,
-      docType: (isStandardType ? tpl.docType : 'CUSTOM') as DocumentType,
-      customTypeName: !isStandardType ? tpl.name : undefined,
-      sections: tpl.sections.map((s, idx) => ({
-        id: s.id || `sec_tpl_${idx}`,
-        title: s.title,
-        content: s.content,
-      })),
-      useKop: tpl.useKopDefault ?? true,
-      kopMode: tpl.kopMode || activeDoc.kopMode || 'manual',
-      targetPages: targetP,
-      sopMetadata: activeDoc.sopMetadata ? {
-        ...activeDoc.sopMetadata,
-        halaman: `1/${targetP}`,
-      } : undefined,
-      originalDocxHtml: tpl.originalDocxHtml,
-    };
+  // Handle Type Change
+  const handleTypeChange = (newTypeStr: string) => {
+    if (newTypeStr.startsWith('tpl:')) {
+      const tplId = newTypeStr.replace('tpl:', '');
+      const foundTpl = storedTemplates.find((t) => t.id === tplId);
+      if (foundTpl) {
+        updateActiveTab({}, {
+          ...activeDoc,
+          title: foundTpl.name,
+          docType: (['SOP', 'SK', 'KAK', 'PEDOMAN', 'PANDUAN'].includes(foundTpl.docType) ? foundTpl.docType : 'CUSTOM') as DocumentType,
+          customTypeName: !['SOP', 'SK', 'KAK', 'PEDOMAN', 'PANDUAN'].includes(foundTpl.docType) ? foundTpl.name : undefined,
+          sections: foundTpl.sections.map((s, idx) => ({
+            id: s.id || `sec_tpl_${idx}`,
+            title: s.title,
+            content: s.content,
+          })),
+          useKop: foundTpl.useKopDefault ?? true,
+          kopMode: foundTpl.kopMode || 'manual',
+          originalDocxHtml: foundTpl.originalDocxHtml,
+          originalDocxBase64: foundTpl.originalDocxBase64,
+        });
+        triggerNotice(`Template "${foundTpl.name}" berhasil diterapkan!`);
+        return;
+      }
+    }
 
-    updateActiveTab({ targetPages: targetP }, newDoc);
-    triggerNotice(`Template "${tpl.name}" berhasil diterapkan otomatis ke dokumen!`);
+    const standardTypes = ['SOP', 'SK', 'KAK', 'PEDOMAN', 'PANDUAN'];
+    if (standardTypes.includes(newTypeStr)) {
+      updateActiveTab({}, {
+        ...activeDoc,
+        docType: newTypeStr as DocumentType,
+        customTypeName: undefined,
+        originalDocxHtml: undefined,
+      });
+    } else {
+      const customDef = customTypes.find((c) => c.id === newTypeStr);
+      updateActiveTab({}, {
+        ...activeDoc,
+        docType: 'CUSTOM',
+        customTypeName: customDef ? customDef.name : newTypeStr,
+        originalDocxHtml: undefined,
+      });
+    }
   };
 
-  // Change Document Type
-  const handleTypeChange = (newTypeValue: string) => {
-    // If it is from stored templates (prefixed with "tpl:")
-    if (newTypeValue.startsWith('tpl:')) {
-      const tplId = newTypeValue.replace('tpl:', '');
-      handleApplyTemplateById(tplId);
+  // Handle Target Pages Change
+  const handleTargetPagesChange = (pages: number) => {
+    const val = Math.max(1, Math.min(10, pages));
+    updateActiveTab({ targetPages: val }, { ...activeDoc, targetPages: val });
+    if (selectedPreviewPage > val) {
+      setSelectedPreviewPage(val);
+    }
+  };
+
+  // STOP GENERATE FUNCTION
+  const handleStopGenerate = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsGenerating(false);
+    triggerNotice('Proses generate AI telah dihentikan.');
+  };
+
+  // GENERATE VIA AI
+  const handleGenerateAI = async () => {
+    if (!activeDoc.title.trim()) {
+      setErrorMsg('Harap masukkan judul dokumen terlebih dahulu');
       return;
     }
 
-    const isCustom = customTypes.find((c) => c.id === newTypeValue);
-    let defaultSections: DocumentSection[] = [];
-
-    if (newTypeValue === 'SOP') {
-      defaultSections = [
-        { id: 'sec_1', title: '1. Pengertian', content: 'Uraian definisi dan ruang lingkup pelayanan terintegrasi...' },
-        { id: 'sec_2', title: '2. Tujuan', content: 'Sebagai acuan penerapan langkah-langkah dalam pelayanan...' },
-        { id: 'sec_3', title: '3. Kebijakan', content: 'Surat Keputusan Kepala {{nama_puskesmas}} Nomor {{nomor_surat_sk}} tentang...' },
-        { id: 'sec_4', title: '4. Referensi', content: '1. Undang-Undang Nomor 17 Tahun 2023 tentang Kesehatan\n2. Kepmenkes HK.01.07/MENKES/2015/2023 tentang Juknis Integrasi Pelayanan Kesehatan Primer' },
-        { id: 'sec_5', title: '5. Prosedur / Langkah-Langkah', content: '1. Petugas menyapa pasien dengan ramah dan memverifikasi identitas.\n2. Petugas melakukan skrining kesehatan sesuai siklus hidup.\n3. Petugas mencatat hasil pemeriksaan ke dalam sistem rekam medis.' },
-        { id: 'sec_6', title: '6. Diagram Alir', content: 'Pendaftaran -> Ruang Pelayanan Klaster -> Pemeriksaan Penunjang (bila perlu) -> Farmasi/Rujuk' },
-        { id: 'sec_7', title: '7. Unit Terkait', content: 'Pendaftaran, Ruang Pemeriksaan Klaster, Laboratorium, Farmasi' },
-        { id: 'sec_8', title: '8. Rekaman Historis Perubahan', content: 'No | Yang Diubah | Isi Perubahan | Tgl Diberlakukan\n1.  | Format Dokumen | Penyesuaian Standar ILP | 2026' },
-      ];
-    } else if (newTypeValue === 'SK') {
-      defaultSections = [
-        { id: 'sec_sk_1', title: 'MENIMBANG', content: 'a. bahwa dalam rangka peningkatan mutu pelayanan kesehatan dan keselamatan pasien di {{nama_puskesmas}};\nb. bahwa untuk kelancaran pelaksanaan tugas perlu ditetapkan regulasi internal;\nc. bahwa berdasarkan pertimbangan sebagaimana dimaksud dalam huruf a dan b, perlu menetapkan Keputusan Kepala {{nama_puskesmas}};' },
-        { id: 'sec_sk_2', title: 'MENGINGAT', content: '1. Undang-Undang Nomor 17 Tahun 2023 tentang Kesehatan;\n2. Peraturan Menteri Kesehatan Nomor 43 Tahun 2019 tentang Pusat Kesehatan Masyarakat;\n3. Keputusan Menteri Kesehatan Nomor HK.01.07/MENKES/2015/2023 tentang Integrasi Pelayanan Kesehatan Primer;' },
-        { id: 'sec_sk_3', title: 'MEMUTUSKAN', content: 'MENETAPKAN: KEPUTUSAN KEPALA {{nama_puskesmas}} TENTANG PENETAPAN REGULASI OPERASIONAL.\n\nKESATU: Menetapkan standar pelaksanaan kegiatan sebagaimana tercantum dalam lampiran keputusan ini.\n\nKEDUA: Segala biaya yang timbul dibebankan pada anggaran yang sesuai.\n\nKETIGA: Keputusan ini berlaku sejak tanggal ditetapkan.' },
-      ];
-    } else if (newTypeValue === 'KAK') {
-      defaultSections = [
-        { id: 'sec_kak_1', title: 'I. Pendahuluan', content: 'Puskesmas merupakan faskes tingkat pertama yang menyelenggarakan pelayanan kesehatan terpadu...' },
-        { id: 'sec_kak_2', title: 'II. Latar Belakang', content: 'Transformasi layanan primer berfokus pada pendekatan siklus hidup...' },
-        { id: 'sec_kak_3', title: 'III. Tujuan', content: 'Tujuan Umum:\nMeningkatkan capaian mutu pelayanan.\n\nTujuan Khusus:\n1. Meningkatkan cakupan skrining kesehatan.\n2. Menjamin kontinuitas layanan.' },
-        { id: 'sec_kak_4', title: 'IV. Kegiatan Pokok & Rincian Kegiatan', content: '1. Pelaksanaan skrining terpadu.\n2. Edukasi dan konseling kesehatan.\n3. Pencatatan dan evaluasi berkala.' },
-        { id: 'sec_kak_5', title: 'V. Cara Melaksanakan Kegiatan', content: 'Kegiatan dilaksanakan secara komprehensif oleh tim kerja klaster...' },
-        { id: 'sec_kak_6', title: 'VI. Sasaran', content: 'Masyarakat di wilayah kerja {{nama_puskesmas}}.' },
-        { id: 'sec_kak_7', title: 'VII. Jadwal Pelaksanaan', content: 'Dilaksanakan secara berkala setiap bulan tahun {{tahun_anggaran}}.' },
-        { id: 'sec_kak_8', title: 'VIII. Evaluasi Pelaksanaan Kegiatan', content: 'Evaluasi dilakukan setiap akhir bulan oleh Penanggung Jawab Klaster.' },
-        { id: 'sec_kak_9', title: 'IX. Pencatatan & Pelaporan', content: 'Hasil kegiatan dicatat dan dilaporkan kepada Kepala Puskesmas.' },
-      ];
-    } else if (isCustom) {
-      defaultSections = isCustom.defaultSections.map((s, idx) => ({
-        id: `sec_custom_${idx}`,
-        title: `${idx + 1}. ${s}`,
-        content: `Uraian untuk ${s}...`,
-      }));
-    } else {
-      defaultSections = [
-        { id: 'sec_ped_1', title: 'BAB I PENDAHULUAN', content: 'Latar Belakang, Tujuan, dan Ruang Lingkup Pedoman...' },
-        { id: 'sec_ped_2', title: 'BAB II STANDAR KETENAGAAN', content: 'Kualifikasi Sumber Daya Manusia dan Distribusi Ketenagaan...' },
-        { id: 'sec_ped_3', title: 'BAB III STANDAR FASILITAS', content: 'Sarana, Prasarana, dan Denah Ruang Pelayanan...' },
-        { id: 'sec_ped_4', title: 'BAB IV TATA LAKSANA PELAYANAN', content: 'Alur Pelayanan dan Langkah Penatalaksanaan Terintegrasi...' },
-        { id: 'sec_ped_5', title: 'BAB V LOGISTIK & KESELAMATAN', content: 'Pengelolaan Bahan Medis Habis Pakai dan Manajemen Risiko...' },
-        { id: 'sec_ped_6', title: 'BAB VI PENGENDALIAN MUTU', content: 'Indikator Mutu dan Evaluasi Kepatuhan Standar...' },
-      ];
-    }
-
-    const updatedDoc: PuskesDoc = {
-      ...activeDoc,
-      docType: (isCustom ? 'CUSTOM' : newTypeValue) as DocumentType,
-      customTypeName: isCustom ? isCustom.name : undefined,
-      sections: defaultSections,
-    };
-
-    updateActiveTab({}, updatedDoc);
-  };
-
-  // Generate Document via Server-side AI
-  const handleGenerateAI = async () => {
     setIsGenerating(true);
     setErrorMsg(null);
+    setProgressPercent(10);
+    setProgressStepText(
+      selectedAgent === 'gemini'
+        ? `Menghubungkan ke Google Gemini (${userAccount.email})...`
+        : `Menghubungkan ke Custom AI (${customAgentState.model || 'OpenAI'})...`
+    );
 
-    const agentConfig = getStoredAgentConfig();
+    abortControllerRef.current = new AbortController();
     const targetP = activeTab.targetPages || 2;
 
+    const progressTimer = setInterval(() => {
+      setProgressPercent((prev) => {
+        if (prev >= 94) return 94;
+        const inc = prev < 35 ? 12 : prev < 70 ? 7 : 3;
+        const next = prev + inc;
+        if (next < 30) setProgressStepText('Menyiapkan prompt naskah & variabel faskes...');
+        else if (next < 60) setProgressStepText('Menganalisis regulasi Kemenkes & indikator ILP...');
+        else if (next < 85) setProgressStepText(`Menyusun naskah via ${selectedAgent === 'gemini' ? 'Google Gemini 2.5 Flash' : 'Custom AI'}...`);
+        else setProgressStepText('Memformat bab, pasal, dan tabel akreditasi...');
+        return next;
+      });
+    }, 550);
+
     try {
+      const activeCustomAgent = selectedAgent === 'custom' && customAgentState.enabled && customAgentState.apiKey ? customAgentState : undefined;
+
       const res = await fetch('/api/generate-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: abortControllerRef.current.signal,
         body: JSON.stringify({
           docType: activeDoc.docType === 'CUSTOM' ? (activeDoc.customTypeName || 'Custom') : activeDoc.docType,
           klaster: activeKlasterInfo.name,
@@ -514,16 +614,20 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
           context: activeTab.contextInput,
           customInstructions: activeTab.customInstructions,
           targetPages: targetP,
+          selectedDatabaseItems: selectedDatabaseItems,
           variables: variables.reduce((acc: any, item) => {
             acc[item.key] = item.value;
             return acc;
           }, {}),
-          customAgentConfig: agentConfig.enabled ? agentConfig : undefined,
+          customAgentConfig: activeCustomAgent,
         }),
       });
 
       const json = await res.json();
       if (json.success && json.data) {
+        setProgressPercent(100);
+        setProgressStepText('Selesai! Membuka pratinjau...');
+
         const d = json.data;
         const newSections: DocumentSection[] = (d.sections || []).map((s: any, idx: number) => ({
           id: 'sec_gen_' + idx,
@@ -553,15 +657,36 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
           rawFormattedText: d.rawFormattedText,
         };
 
+        // Record into history
+        saveDocHistoryItem({
+          id: 'hist_' + Date.now(),
+          title: updatedDoc.title,
+          docType: updatedDoc.docType,
+          klaster: activeKlasterInfo.name,
+          generatedAt: new Date().toISOString(),
+          targetPages: targetP,
+        });
+        setDocHistoryList(getStoredDocHistory());
+
+        // Update active tab and open Pop-up Preview modal!
         updateActiveTab({}, updatedDoc);
-        triggerNotice(`Dokumen berhasil digenerate via AI (${json.provider === 'custom' ? 'Custom Agent' : 'Gemini 3.8 Flash'}) untuk ${targetP} halaman!`);
+        setGeneratedPreviewDoc(updatedDoc);
+        setIsGeneratedPreviewModalOpen(true);
+
+        triggerNotice(`Dokumen berhasil dibuat via AI! Membuka popup pratinjau...`);
       } else {
         setErrorMsg(json.error || 'Gagal menghasilkan dokumen dari AI');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Terjadi gangguan jaringan saat menghubungi AI');
+      if (err.name === 'AbortError') {
+        triggerNotice('Proses generate telah dihentikan oleh pengguna.');
+      } else {
+        setErrorMsg(err.message || 'Terjadi gangguan jaringan saat menghubungi AI');
+      }
     } finally {
+      clearInterval(progressTimer);
       setIsGenerating(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -569,9 +694,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
   const handleExecuteBracketPrompt = async (globalIdx: number) => {
     const sec = activeDoc.sections[globalIdx];
     if (!sec) return;
-    setExecutingBracketIdx(globalIdx);
-    setErrorMsg(null);
 
+    setExecutingBracketIdx(globalIdx);
     const agentConfig = getStoredAgentConfig();
 
     try {
@@ -580,35 +704,33 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sectionTitle: sec.title,
-          sectionContent: sec.content,
+          content: sec.content,
           docType: activeDoc.docType,
-          klaster: activeKlasterInfo.name,
-          docTitle: activeDoc.title,
-          variables: variables.reduce((acc: any, v) => {
-            acc[v.key] = v.value;
+          variables: variables.reduce((acc: any, item) => {
+            acc[item.key] = item.value;
             return acc;
           }, {}),
+          selectedDatabaseItems: selectedDatabaseItems,
           customAgentConfig: agentConfig.enabled ? agentConfig : undefined,
         }),
       });
 
       const json = await res.json();
-      if (json.success && json.updatedContent) {
+      if (json.success && json.content) {
         const updated = [...activeDoc.sections];
-        updated[globalIdx] = { ...sec, content: json.updatedContent };
+        updated[globalIdx] = { ...sec, content: json.content };
         updateActiveTab({}, { ...activeDoc, sections: updated });
-        triggerNotice(`Perintah AI [...] pada "${sec.title}" berhasil dieksekusi!`);
+        triggerNotice(`Perintah [...] pada "${sec.title}" berhasil dieksekusi via AI!`);
       } else {
-        setErrorMsg(json.error || 'Gagal mengeksekusi perintah AI pada bagian ini');
+        setErrorMsg(json.error || 'Gagal mengeksekusi perintah kurung siku');
       }
     } catch (err: any) {
-      setErrorMsg(`Gagal: ${err.message}`);
+      setErrorMsg(err.message || 'Terjadi gangguan saat eksekusi prompt kurung siku');
     } finally {
       setExecutingBracketIdx(null);
     }
   };
 
-  // Open Structured Prompt for External AI
   const handleOpenPrompt = () => {
     const promptText = generateStructuredPrompt(
       activeDoc.docType,
@@ -624,6 +746,15 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
   // Save Document to Local History
   const handleSaveDoc = () => {
     saveDocument(activeDoc);
+    saveDocHistoryItem({
+      id: 'hist_' + Date.now(),
+      title: activeDoc.title,
+      docType: activeDoc.docType,
+      klaster: activeKlasterInfo.name,
+      generatedAt: new Date().toISOString(),
+      targetPages: activeTab.targetPages || 2,
+    });
+    setDocHistoryList(getStoredDocHistory());
     triggerNotice(`Dokumen "${activeDoc.title}" berhasil disimpan ke arsip!`);
   };
 
@@ -637,9 +768,44 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
     }
   };
 
-  // Print Document (Direct Print or Save as PDF)
+  // ROBUST PRINT FUNCTION (Isolates multi-page A4 document into print frame)
   const handlePrint = () => {
-    window.print();
+    try {
+      const printFrame = document.createElement('iframe');
+      printFrame.style.position = 'fixed';
+      printFrame.style.right = '0';
+      printFrame.style.bottom = '0';
+      printFrame.style.width = '0';
+      printFrame.style.height = '0';
+      printFrame.style.border = '0';
+      document.body.appendChild(printFrame);
+
+      const frameDoc = printFrame.contentWindow?.document;
+      if (frameDoc) {
+        frameDoc.open();
+        frameDoc.write(generatePrintableDocumentHtml(activeDoc, profile, variables, totalTargetPages));
+        frameDoc.close();
+
+        setTimeout(() => {
+          try {
+            printFrame.contentWindow?.focus();
+            printFrame.contentWindow?.print();
+          } catch {
+            window.print();
+          } finally {
+            setTimeout(() => {
+              if (document.body.contains(printFrame)) {
+                document.body.removeChild(printFrame);
+              }
+            }, 3000);
+          }
+        }, 400);
+      } else {
+        window.print();
+      }
+    } catch {
+      window.print();
+    }
   };
 
   // Export document as JSON
@@ -671,7 +837,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
           title: fileNameTitle,
           originalDocxHtml: docxRes.html,
         });
-        triggerNotice(`Naskah Word "${file.name}" berhasil dimuat sesuai tampilan aslinya dan siap diedit!`);
+        triggerNotice(`Naskah Word "${file.name}" berhasil dimuat!`);
       } catch (err: any) {
         setErrorMsg(`Gagal membaca Word: ${err.message}`);
       }
@@ -694,67 +860,90 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
     }
   };
 
-  // Quick insert variable into active section
-  const handleInsertVariable = (key: string) => {
-    const tag = `{{${key}}}`;
-    if (activeDoc.sections.length > 0) {
-      const updated = [...activeDoc.sections];
-      updated[0].content += ` ${tag}`;
-      updateActiveTab({}, { ...activeDoc, sections: updated });
-    }
-  };
-
-  // Update a section content
-  const handleSectionContentChange = (index: number, newContent: string) => {
+  const handleSectionContentChange = (idx: number, newContent: string) => {
     const updated = [...activeDoc.sections];
-    updated[index].content = newContent;
+    updated[idx] = { ...updated[idx], content: newContent };
     updateActiveTab({}, { ...activeDoc, sections: updated });
   };
 
-  // Change target pages
-  const handleTargetPagesChange = (num: number) => {
-    const safeNum = Math.max(1, Math.min(10, num));
-    const updatedDoc: PuskesDoc = {
-      ...activeDoc,
-      targetPages: safeNum,
-      sopMetadata: activeDoc.sopMetadata ? {
-        ...activeDoc.sopMetadata,
-        halaman: `1/${safeNum}`,
-      } : undefined,
-    };
-    updateActiveTab({ targetPages: safeNum }, updatedDoc);
+  const toggleDatabaseSelection = (item: PuskesmasDatabaseItem) => {
+    if (!setSelectedDatabaseItems) return;
+    setSelectedDatabaseItems((prev) => {
+      const exists = prev.some((d) => d.id === item.id);
+      if (exists) {
+        return prev.filter((d) => d.id !== item.id);
+      } else {
+        return [...prev, item];
+      }
+    });
+  };
+
+  const handleSelectAllDatabase = () => {
+    if (!setSelectedDatabaseItems) return;
+    setSelectedDatabaseItems(availableDatabases);
+    triggerNotice(`Seluruh ${availableDatabases.length} data capaian Puskesmas dipilih sebagai bahan AI!`);
+  };
+
+  const handleClearAllDatabase = () => {
+    if (!setSelectedDatabaseItems) return;
+    setSelectedDatabaseItems([]);
+    triggerNotice('Pilihan database capaian dikosongkan.');
+  };
+
+  const handleInsertDatabaseSummaryToContext = () => {
+    if (selectedDatabaseItems.length === 0) return;
+    const summaryText = selectedDatabaseItems.map((item, idx) => `
+[DATA ${idx + 1}: ${item.title} - ${item.period || 'Terkini'}]
+${item.summary}
+Indikator:
+${(item.metrics || []).map((m) => `* ${m.key}: ${m.value}${m.target ? ` (Target: ${m.target})` : ''} [${m.status || ''}]`).join('\n')}
+Catatan: ${item.notes || '-'}
+`).join('\n');
+
+    const newContext = activeTab.contextInput
+      ? `${activeTab.contextInput}\n\n--- DATA CAPAIAN PUSKESMAS ---\n${summaryText}`
+      : `--- DATA CAPAIAN PUSKESMAS ---\n${summaryText}`;
+
+    updateActiveTab({ contextInput: newContext });
+    triggerNotice('Ringkasan data capaian berhasil disisipkan ke Catatan Alur / Prompt AI!');
   };
 
   // Determine pagination split of sections for multi-page rendering
   const totalTargetPages = activeTab.targetPages || 2;
   const sectionsPerPage = Math.max(1, Math.ceil(activeDoc.sections.length / totalTargetPages));
 
+  // Current single page slice to render
+  const safeCurrentPage = Math.max(1, Math.min(totalTargetPages, selectedPreviewPage));
+  const currentPageSections = activeDoc.sections.slice(
+    (safeCurrentPage - 1) * sectionsPerPage,
+    safeCurrentPage * sectionsPerPage
+  );
+
   return (
-    <div className="max-w-7xl mx-auto px-4 lg:px-8 py-6 space-y-5">
-      {/* MULTIPLE GENERATOR TABS BAR */}
-      <div className="no-print bg-white p-2 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between gap-2 overflow-x-auto">
-        <div className="flex items-center gap-1.5 flex-1 min-w-0 overflow-x-auto py-0.5">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 space-y-4">
+      {/* Top Multiple Tabs & Action Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-2.5 rounded-2xl border border-slate-200/80 shadow-xs no-print">
+        {/* Generator Tabs List */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 flex-1">
           {tabs.map((tab, idx) => {
             const isActive = tab.id === activeTabId;
             return (
               <div
                 key={tab.id}
-                onClick={() => handleSelectTab(tab.id)}
-                className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-all border shrink-0 max-w-[220px] ${
+                onClick={() => {
+                  setActiveTabId(tab.id);
+                  setSelectedPreviewPage(1);
+                  setCurrentDoc(tab.doc);
+                }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-all shrink-0 border ${
                   isActive
-                    ? 'bg-gradient-to-r from-purple-50 to-pink-50 text-purple-900 border-purple-300 shadow-2xs ring-1 ring-purple-400/40'
-                    : 'bg-slate-50 hover:bg-slate-100 text-slate-600 border-slate-200'
+                    ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 hover:text-slate-900'
                 }`}
               >
-                <span className="w-4 h-4 rounded-full bg-purple-600/10 text-purple-700 text-[10px] flex items-center justify-center font-mono">
-                  {idx + 1}
-                </span>
-                <span className="truncate flex-1">
-                  {tab.doc.title || `Dokumen ${idx + 1}`}
-                </span>
-                <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 font-bold uppercase">
-                  {tab.doc.docType}
-                </span>
+                <FileText className="w-3.5 h-3.5" />
+                <span className="max-w-[140px] truncate">{tab.title || `Dokumen ${idx + 1}`}</span>
+
                 {tabs.length > 1 && (
                   <button
                     type="button"
@@ -773,7 +962,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
           <button
             type="button"
             onClick={handleAddNewTab}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 border-dashed transition-all shrink-0 hover:scale-102"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 border-dashed transition-all shrink-0 cursor-pointer"
             title="Buka tab lembar kerja dokumen baru"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -783,25 +972,41 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
 
         {/* Global Action Toolbar */}
         <div className="flex items-center gap-1.5 shrink-0 pl-2 border-l border-slate-200">
+          {/* Riwayat Dokumen Button */}
+          <button
+            onClick={() => {
+              setDocHistoryList(getStoredDocHistory());
+              setIsDocHistoryModalOpen(true);
+            }}
+            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl shadow-2xs transition-all hover:border-purple-300 cursor-pointer"
+            title="Lihat riwayat dokumen yang pernah di-generate"
+          >
+            <History className="w-3.5 h-3.5 text-indigo-600" />
+            <span className="hidden sm:inline">Riwayat ({docHistoryList.length})</span>
+          </button>
+
           <button
             onClick={handleExportWord}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl shadow-2xs transition-all hover:border-purple-300"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl shadow-2xs transition-all hover:border-purple-300 cursor-pointer"
             title="Ekspor dokumen aktif ke file Microsoft Word (.docx)"
           >
             <Download className="w-3.5 h-3.5 text-purple-600" />
             <span className="hidden sm:inline">.DOCX</span>
           </button>
+
+          {/* Tombol Cetak (Fixed & Isolated) */}
           <button
             onClick={handlePrint}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl shadow-2xs transition-all hover:border-purple-300"
-            title="Cetak langsung atau simpan sebagai PDF"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl shadow-2xs transition-all hover:border-purple-300 cursor-pointer"
+            title="Cetak langsung atau simpan sebagai PDF A4 presisi"
           >
             <Printer className="w-3.5 h-3.5 text-pink-600" />
-            <span className="hidden sm:inline">Cetak</span>
+            <span>Cetak</span>
           </button>
+
           <button
             onClick={handleSaveDoc}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 rounded-xl shadow-sm shadow-purple-500/20 transition-all active:scale-95"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 rounded-xl shadow-sm shadow-purple-500/20 transition-all active:scale-95 cursor-pointer"
             title="Simpan dokumen ini ke arsip lokal"
           >
             <Save className="w-3.5 h-3.5" />
@@ -815,7 +1020,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
         <div className="space-y-0.5">
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-purple-600 text-white shadow-2xs">
-              ILP Klaster {activeKlasterInfo.number}
+              {activeDoc.klaster === 'KUSTOM' ? 'Kustom / Manual' : `ILP Klaster ${activeKlasterInfo.number}`}
             </span>
             <h1 className="text-sm font-bold text-slate-900">{activeKlasterInfo.name}</h1>
           </div>
@@ -857,7 +1062,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
               Pengaturan Dokumen Akreditasi
             </h3>
 
-            {/* Pilihan Jenis Dokumen (Otomatis mencakup Pustaka Template) */}
+            {/* Pilihan Jenis Dokumen */}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-xs font-semibold text-slate-700">
@@ -868,7 +1073,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                     type="button"
                     onClick={onNavigateToTemplates}
                     className="text-[11px] font-bold text-purple-700 hover:text-purple-900 flex items-center gap-1 hover:underline transition-all"
-                    title="Buka Tab Pustaka Template untuk kelola, edit, dan import/export seluruh template"
+                    title="Buka Tab Pustaka Template untuk kelola template"
                   >
                     <BookOpen className="w-3.5 h-3.5 text-purple-600" />
                     <span>Pustaka Template ({storedTemplates.length})</span>
@@ -879,7 +1084,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
               <select
                 value={activeDoc.docType === 'CUSTOM' ? (activeDoc.customTypeName || 'CUSTOM') : activeDoc.docType}
                 onChange={(e) => handleTypeChange(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 font-semibold bg-white"
+                className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 font-semibold bg-white cursor-pointer"
               >
                 <optgroup label="Standar Akreditasi Kemenkes">
                   <option value="SOP">SOP (Standar Operasional Prosedur - Kotak Akreditasi)</option>
@@ -913,7 +1118,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                 <button
                   type="button"
                   onClick={handleExportJSON}
-                  className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200"
+                  className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200 cursor-pointer"
                   title="Ekspor dokumen format JSON"
                 >
                   <Download className="w-3 h-3 text-purple-600" />
@@ -935,8 +1140,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
               </div>
             </div>
 
-            {/* Target Jumlah Halaman yang Mau Digenerate */}
-            <div className="p-3 rounded-xl bg-purple-50/50 border border-purple-200/70 space-y-2">
+            {/* Target Jumlah Halaman (Preset buttons deleted, only manual input) */}
+            <div className="p-3 rounded-xl bg-purple-50/50 border border-purple-200/70">
               <div className="flex items-center justify-between">
                 <div>
                   <label className="block text-xs font-bold text-slate-800">
@@ -956,44 +1161,42 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                   <span className="text-xs font-semibold text-purple-900">Hal</span>
                 </div>
               </div>
-
-              {/* Quick Preset Buttons */}
-              <div className="flex items-center gap-1.5 pt-0.5">
-                {[1, 2, 3, 4, 5].map((pages) => (
-                  <button
-                    key={pages}
-                    type="button"
-                    onClick={() => handleTargetPagesChange(pages)}
-                    className={`flex-1 py-1 text-[11px] font-semibold rounded-lg border transition-all ${
-                      totalTargetPages === pages
-                        ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-purple-300 hover:bg-purple-50/40'
-                    }`}
-                  >
-                    {pages} Hal
-                  </button>
-                ))}
-              </div>
             </div>
 
-            {/* Pilihan Klaster ILP */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Pilih Klaster ILP (Integrasi Layanan Primer)
+            {/* Pilihan Klaster ILP (dengan Kustom / Manual) */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700">
+                Pilih Klaster ILP / Kategori Layanan
               </label>
               <select
                 value={activeDoc.klaster}
                 onChange={(e) => updateActiveTab({}, { ...activeDoc, klaster: e.target.value as IlpKlaster })}
-                className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 bg-white"
+                className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 bg-white font-medium cursor-pointer"
               >
                 {ILP_KLASTERS.map((k) => (
                   <option key={k.id} value={k.id}>{k.name}</option>
                 ))}
               </select>
+
+              {/* Input Klaster Kustom / Manual jika KUSTOM dipilih */}
+              {activeDoc.klaster === 'KUSTOM' && (
+                <div className="p-2.5 rounded-xl bg-purple-50/70 border border-purple-200 space-y-1.5 animate-in fade-in">
+                  <label className="block text-[11px] font-bold text-purple-900">
+                    Nama Klaster Kustom / Manual:
+                  </label>
+                  <input
+                    type="text"
+                    value={activeDoc.customKlasterName || ''}
+                    onChange={(e) => updateActiveTab({}, { ...activeDoc, customKlasterName: e.target.value })}
+                    placeholder="Contoh: Klaster 6: UKS & Remaja, Tim Mutu & Audit, dll"
+                    className="w-full px-2.5 py-1.5 text-xs border border-purple-300 rounded-lg bg-white font-semibold text-purple-950 focus:ring-1 focus:ring-purple-500"
+                  />
+                </div>
+              )}
             </div>
 
-            {/* Mode KOP Surat - Fixed Icon & Error Handling */}
-            <div className="p-3.5 rounded-xl bg-purple-50/60 border border-purple-200/80 space-y-3">
+            {/* Gunakan KOP Surat Resmi (Mode KOP Dropdown) */}
+            <div className="p-3.5 rounded-xl bg-purple-50/60 border border-purple-200/80 space-y-2.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-lg bg-white border border-purple-200 flex items-center justify-center p-1 overflow-hidden shrink-0 shadow-2xs">
@@ -1024,85 +1227,65 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                 </label>
               </div>
 
-              {/* Pilihan Mode KOP yang akan dipakai */}
+              {/* Mode KOP Dropdown */}
               {activeDoc.useKop && (
-                <div className="pt-2 border-t border-purple-100 space-y-1.5 animate-fade-in">
+                <div className="pt-2 border-t border-purple-100 space-y-1 animate-fade-in">
                   <label className="block text-[11px] font-bold text-slate-700">
-                    Pilih Mode KOP yang Akan Dipakai:
+                    Mode KOP Surat:
                   </label>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {/* Mode 1: Manual / Teks Standar */}
-                    <button
-                      type="button"
-                      onClick={() => updateActiveTab({}, { ...activeDoc, kopMode: 'manual' })}
-                      className={`p-2 rounded-lg border text-left transition-all flex flex-col justify-between ${
-                        (activeDoc.kopMode || profile.kopMode || 'manual') === 'manual'
-                          ? 'bg-white border-purple-600 text-purple-900 shadow-2xs ring-1 ring-purple-600'
-                          : 'bg-white/60 border-slate-200 text-slate-600 hover:bg-white hover:border-purple-200'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <FileText className="w-3.5 h-3.5 text-purple-600" />
-                        {(activeDoc.kopMode || profile.kopMode || 'manual') === 'manual' && (
-                          <span className="w-2 h-2 rounded-full bg-purple-600" />
-                        )}
-                      </div>
-                      <span className="text-[11px] font-bold leading-tight block">Teks Baku</span>
-                      <span className="text-[9px] text-slate-400 mt-0.5 block leading-tight">2 Logo + Teks</span>
-                    </button>
-
-                    {/* Mode 2: Gambar KOP Jadi */}
-                    <button
-                      type="button"
-                      onClick={() => updateActiveTab({}, { ...activeDoc, kopMode: 'image' })}
-                      className={`p-2 rounded-lg border text-left transition-all flex flex-col justify-between ${
-                        activeDoc.kopMode === 'image' || (!activeDoc.kopMode && profile.kopMode === 'image')
-                          ? 'bg-white border-purple-600 text-purple-900 shadow-2xs ring-1 ring-purple-600'
-                          : 'bg-white/60 border-slate-200 text-slate-600 hover:bg-white hover:border-purple-200'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <ImageIcon className="w-3.5 h-3.5 text-pink-600" />
-                        {(activeDoc.kopMode === 'image' || (!activeDoc.kopMode && profile.kopMode === 'image')) && (
-                          <span className="w-2 h-2 rounded-full bg-pink-600" />
-                        )}
-                      </div>
-                      <span className="text-[11px] font-bold leading-tight block">Gambar KOP</span>
-                      <span className={`text-[9px] mt-0.5 block leading-tight ${profile.gambarKopJadi ? 'text-emerald-600 font-medium' : 'text-amber-600'}`}>
-                        {profile.gambarKopJadi ? 'Gambar Siap' : 'Belum Upload'}
-                      </span>
-                    </button>
-
-                    {/* Mode 3: Editor KOP Visual */}
-                    <button
-                      type="button"
-                      onClick={() => updateActiveTab({}, { ...activeDoc, kopMode: 'drag_editor' })}
-                      className={`p-2 rounded-lg border text-left transition-all flex flex-col justify-between ${
-                        activeDoc.kopMode === 'drag_editor' || (!activeDoc.kopMode && profile.kopMode === 'drag_editor')
-                          ? 'bg-white border-purple-600 text-purple-900 shadow-2xs ring-1 ring-purple-600'
-                          : 'bg-white/60 border-slate-200 text-slate-600 hover:bg-white hover:border-purple-200'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <Sliders className="w-3.5 h-3.5 text-indigo-600" />
-                        {(activeDoc.kopMode === 'drag_editor' || (!activeDoc.kopMode && profile.kopMode === 'drag_editor')) && (
-                          <span className="w-2 h-2 rounded-full bg-indigo-600" />
-                        )}
-                      </div>
-                      <span className="text-[11px] font-bold leading-tight block">Editor Visual</span>
-                      <span className="text-[9px] text-slate-400 mt-0.5 block leading-tight">Desain Profil</span>
-                    </button>
-                  </div>
+                  <select
+                    value={activeDoc.kopMode || profile.kopMode || 'manual'}
+                    onChange={(e) => updateActiveTab({}, { ...activeDoc, kopMode: e.target.value as any })}
+                    className="w-full px-3 py-1.5 text-xs border border-purple-200 rounded-lg bg-white font-semibold text-purple-950 focus:ring-2 focus:ring-purple-500/20 cursor-pointer"
+                  >
+                    <option value="manual">Mode 1: Teks Baku (2 Logo + Teks Alamat Faskes)</option>
+                    <option value="image">Mode 2: Gambar KOP Jadi (Upload Gambar Penuh dari Profil)</option>
+                    <option value="drag_editor">Mode 3: Editor KOP Visual (Desain Fleksibel)</option>
+                  </select>
                 </div>
               )}
             </div>
 
-            {/* Judul Dokumen & Nomor */}
-            <div className="space-y-3">
+            {/* Pengaturan Nomor Halaman (Header Footer Pengganti) */}
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800">Nomor Halaman</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={activeDoc.showPageNumber !== false}
+                    onChange={(e) => updateActiveTab({}, { ...activeDoc, showPageNumber: e.target.checked })}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-4.5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-purple-600"></div>
+                </label>
+              </div>
+
+              {activeDoc.showPageNumber !== false && (
+                <div className="pt-1.5 border-t border-slate-200 space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-600">
+                    Posisi Nomor Halaman:
+                  </label>
+                  <select
+                    value={activeDoc.pageNumberPosition || 'bottom-right'}
+                    onChange={(e) => updateActiveTab({}, { ...activeDoc, pageNumberPosition: e.target.value as any })}
+                    className="w-full px-2.5 py-1 text-xs border border-slate-200 rounded-lg bg-white font-medium cursor-pointer"
+                  >
+                    <option value="bottom-right">Bawah Kanan (Standar)</option>
+                    <option value="bottom-center">Bawah Tengah</option>
+                    <option value="bottom-left">Bawah Kiri</option>
+                    <option value="top-right">Atas Kanan</option>
+                    <option value="top-center">Atas Tengah</option>
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Judul Dokumen & Duplicate Warning */}
+            <div className="space-y-2">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
-                  <span>Judul Dokumen</span>
-                  <span className="text-[10px] text-purple-600 font-mono">Ketik {'{{'} untuk variabel</span>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Judul Dokumen
                 </label>
                 <input
                   type="text"
@@ -1118,25 +1301,34 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                 />
               </div>
 
-              {/* Rekomendasi Judul Klaster */}
-              <div className="flex flex-wrap gap-1">
-                <span className="text-[10px] text-slate-400 font-semibold mr-1">Rekomendasi Judul:</span>
-                {activeKlasterInfo.examples.map((ex, idx) => (
+              {/* NOTIFIKASI KEMBAR JUDUL DENGAN MEDIA ATAU RIWAYAT DOKUMEN */}
+              {duplicateTitleWarning && (
+                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start justify-between gap-2 animate-in fade-in">
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold block leading-tight">Peringatan Judul Serupa</span>
+                      <p className="text-[11px] text-amber-800 leading-tight mt-0.5">
+                        {duplicateTitleWarning.message}
+                      </p>
+                    </div>
+                  </div>
                   <button
-                    key={idx}
                     type="button"
-                    onClick={() => updateActiveTab({}, { ...activeDoc, title: ex })}
-                    className="text-[10px] px-2 py-0.5 bg-slate-100 hover:bg-purple-50 hover:text-purple-700 rounded border border-slate-200 text-slate-600 transition-colors"
+                    onClick={() => {
+                      setDocHistoryList(getStoredDocHistory());
+                      setIsDocHistoryModalOpen(true);
+                    }}
+                    className="shrink-0 text-[10px] font-bold text-amber-900 bg-amber-200 hover:bg-amber-300 px-2 py-1 rounded-md transition-colors cursor-pointer"
                   >
-                    {ex}
+                    Buka Log
                   </button>
-                ))}
-              </div>
+                </div>
+              )}
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
-                  <span>Nomor Dokumen / No. SK</span>
-                  <span className="text-[10px] text-purple-600 font-mono">Ketik {'{{'} untuk variabel</span>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Nomor Dokumen / No. SK
                 </label>
                 <input
                   type="text"
@@ -1155,9 +1347,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
 
             {/* Catatan Alur / Konteks Khusus */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
-                <span>Catatan Alur Pelayanan / Notulensi Acuan</span>
-                <span className="text-[10px] text-purple-600 font-mono">Ketik {'{{'} untuk variabel</span>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Catatan Alur Pelayanan / Notulensi Acuan
               </label>
               <textarea
                 rows={3}
@@ -1168,552 +1359,544 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                 }}
                 onKeyUp={(e) => handleInputCheckTrigger(e, 'contextInput')}
                 onKeyDown={handleInputKeyDown}
-                placeholder="Tuliskan catatan alur, petugas pemeriksa, atau ketik {{ untuk memanggil daftar variabel atau selesaikan manual..."
+                placeholder="Tuliskan catatan alur pelayanan, alur tindakan, petugas pelaksana, atau acuan baku faskes..."
                 className="w-full p-2.5 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
               />
             </div>
 
-            {/* AI Generator Action Buttons */}
-            <div className="pt-2 border-t border-slate-100 flex flex-col gap-2">
-              <button
-                onClick={handleGenerateAI}
-                disabled={isGenerating || !activeDoc.title.trim()}
-                className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 via-fuchsia-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 rounded-xl shadow-md shadow-purple-500/20 transition-all active:scale-95"
+            {/* INTEGRASI DATABASE & CAPAIAN PUSKESMAS SEBAGAI BAHAN AI */}
+            <div className="p-3.5 rounded-xl bg-gradient-to-br from-emerald-50/80 via-teal-50/50 to-white border border-emerald-200/90 space-y-2.5 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Database className="w-4 h-4 text-emerald-700" />
+                  <div>
+                    <span className="text-xs font-bold text-slate-900 block leading-tight">
+                      Database & Capaian Puskesmas
+                    </span>
+                    <span className="text-[10px] text-slate-500 block">
+                      Pilih data & metrik capaian sebagai bahan rujukan AI
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                    selectedDatabaseItems.length > 0
+                      ? 'bg-emerald-600 text-white shadow-2xs'
+                      : 'bg-slate-200 text-slate-600'
+                  }`}>
+                    {selectedDatabaseItems.length} Dipilih
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsDbShelfOpen(!isDbShelfOpen)}
+                    className="p-1 text-emerald-700 hover:bg-emerald-100 rounded-lg transition-colors text-xs font-semibold cursor-pointer"
+                  >
+                    {isDbShelfOpen ? 'Sembunyikan' : 'Pilih Data'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Selected items quick chips */}
+              {selectedDatabaseItems.length > 0 && !isDbShelfOpen && (
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {selectedDatabaseItems.map((item) => (
+                    <span
+                      key={item.id}
+                      className="inline-flex items-center gap-1 text-[10px] font-semibold bg-emerald-100/80 text-emerald-900 px-2 py-0.5 rounded-md border border-emerald-300"
+                    >
+                      <Check className="w-2.5 h-2.5 text-emerald-700" />
+                      <span className="truncate max-w-[140px]">{item.title}</span>
+                      <button
+                        type="button"
+                        onClick={() => toggleDatabaseSelection(item)}
+                        className="text-emerald-700 hover:text-rose-600 ml-0.5 cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Expanded Database Shelf with Checkboxes */}
+              {isDbShelfOpen && (
+                <div className="space-y-2 pt-1 border-t border-emerald-200/60 animate-in fade-in duration-150">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-slate-500 font-medium">
+                      Tersedia: {availableDatabases.length} data capaian
+                    </span>
+                    <div className="flex items-center gap-1.5 font-bold">
+                      <button
+                        type="button"
+                        onClick={handleSelectAllDatabase}
+                        className="text-emerald-700 hover:underline cursor-pointer"
+                      >
+                        Pilih Semua
+                      </button>
+                      <span>·</span>
+                      <button
+                        type="button"
+                        onClick={handleClearAllDatabase}
+                        className="text-slate-500 hover:text-rose-600 cursor-pointer"
+                      >
+                        Kosongkan
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 divide-y divide-emerald-100/60">
+                    {availableDatabases.map((dbItem) => {
+                      const isSelected = selectedDatabaseItems.some((d) => d.id === dbItem.id);
+                      return (
+                        <div
+                          key={dbItem.id}
+                          onClick={() => toggleDatabaseSelection(dbItem)}
+                          className={`p-2 rounded-lg cursor-pointer transition-all flex items-start gap-2 text-xs border ${
+                            isSelected
+                              ? 'bg-emerald-100/90 border-emerald-400 text-emerald-950 font-medium shadow-2xs'
+                              : 'bg-white/80 border-slate-200 text-slate-700 hover:bg-white hover:border-emerald-300'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {}}
+                            className="mt-0.5 rounded text-emerald-600 focus:ring-emerald-500 h-3.5 w-3.5 pointer-events-none"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-bold truncate text-[11px] block text-slate-900">
+                                {dbItem.title}
+                              </span>
+                              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-white text-emerald-800 border border-emerald-200 shrink-0">
+                                {dbItem.period || '2026'}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-slate-500 line-clamp-1 mt-0.5">
+                              {dbItem.summary}
+                            </p>
+                            <div className="flex items-center gap-1 mt-1 text-[9px] text-emerald-700">
+                              <span>{(dbItem.metrics || []).length} indikator/metrik</span>
+                              <span>·</span>
+                              <span className="uppercase font-semibold">{dbItem.category.replace('_', ' ')}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Action: Paste summary into context */}
+              {selectedDatabaseItems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleInsertDatabaseSummaryToContext}
+                  className="w-full flex items-center justify-center gap-1.5 py-1 px-2 text-[11px] font-semibold text-emerald-800 bg-emerald-100/70 hover:bg-emerald-200/80 rounded-lg border border-emerald-300 transition-colors cursor-pointer"
+                  title="Sisipkan ringkasan data terpilih ke Catatan Alur / Konteks di atas"
+                >
+                  <Copy className="w-3 h-3 text-emerald-700" />
+                  <span>Sisipkan Ringkasan ke Catatan/Prompt</span>
+                </button>
+              )}
+            </div>
+
+            {/* PILIHAN AI AGENT GENERATOR (Default: Google Gemini Akun Gmail) */}
+            <div className="p-3 rounded-xl bg-purple-50/70 border border-purple-200/90 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <Bot className="w-3.5 h-3.5 text-purple-600" />
+                  <span>Pilihan AI Agent Generator</span>
+                </label>
+                <span className="text-[10px] font-semibold text-purple-700 bg-purple-100 px-2 py-0.5 rounded-full">
+                  {selectedAgent === 'gemini' ? 'Google Gemini Bawaan' : 'Custom AI'}
+                </span>
+              </div>
+
+              <select
+                value={selectedAgent}
+                onChange={(e) => setSelectedAgent(e.target.value as 'gemini' | 'custom')}
+                className="w-full px-2.5 py-1.5 text-xs font-semibold border border-purple-300 rounded-lg bg-white text-purple-950 focus:ring-2 focus:ring-purple-500/20 cursor-pointer"
               >
-                {isGenerating ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Membuat Dokumen via AI ({totalTargetPages} Halaman)...
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-4 h-4 text-fuchsia-200" />
-                    Generate Otomatis via AI ({totalTargetPages} Halaman)
-                  </>
-                )}
-              </button>
+                <option value="gemini">
+                  Google Gemini 2.5 Flash (Tertaut: {userAccount.email || 'Akun Google Faskes'}) [Default]
+                </option>
+                <option value="custom">
+                  Custom AI Agent (OpenAI / DeepSeek / Compatible)
+                </option>
+              </select>
+
+              {selectedAgent === 'gemini' ? (
+                <div className="flex items-center gap-1.5 text-[11px] text-emerald-800 bg-emerald-50 p-2 rounded-lg border border-emerald-200">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span className="leading-tight">
+                    Agent aktif via <strong>Google Gemini 2.5 Flash</strong> (akun <strong>{userAccount.email}</strong>). Tanpa perlu konfigurasi API tambahan.
+                  </span>
+                </div>
+              ) : (
+                <div className="p-2.5 rounded-lg bg-white border border-purple-200 space-y-2 text-xs animate-in fade-in">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-700 text-[11px]">Pengaturan Custom AI Agent</span>
+                    {customAgentState.apiKey && (
+                      <span className="text-[10px] text-emerald-700 font-semibold flex items-center gap-1">
+                        <Check className="w-3 h-3" /> Tersimpan
+                      </span>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-medium text-slate-500 mb-0.5">Base URL / Endpoint</label>
+                    <input
+                      type="text"
+                      value={customAgentState.endpoint}
+                      onChange={(e) => setCustomAgentState({ ...customAgentState, endpoint: e.target.value })}
+                      placeholder="https://api.openai.com/v1/chat/completions"
+                      className="w-full px-2 py-1 text-xs border border-slate-200 rounded-md font-mono"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-medium text-slate-500 mb-0.5">Model</label>
+                      <input
+                        type="text"
+                        value={customAgentState.model}
+                        onChange={(e) => setCustomAgentState({ ...customAgentState, model: e.target.value })}
+                        placeholder="gpt-4o-mini"
+                        className="w-full px-2 py-1 text-xs border border-slate-200 rounded-md font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-medium text-slate-500 mb-0.5">API Key</label>
+                      <input
+                        type="password"
+                        value={customAgentState.apiKey}
+                        onChange={(e) => setCustomAgentState({ ...customAgentState, apiKey: e.target.value })}
+                        placeholder="sk-..."
+                        className="w-full px-2 py-1 text-xs border border-slate-200 rounded-md font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveCustomAgent}
+                    className="w-full py-1.5 text-[11px] font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-300 rounded-lg transition-colors cursor-pointer"
+                  >
+                    Simpan Pengaturan Agent
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* AI Generator Action Buttons (with Interactive Progress Bar & Stop Generate) */}
+            <div className="pt-2 border-t border-slate-100 flex flex-col gap-2">
+              {isGenerating ? (
+                <div className="p-3.5 rounded-xl bg-purple-900 text-white space-y-3 shadow-lg border border-purple-700 animate-in fade-in">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-fuchsia-300 animate-spin" />
+                      <span className="text-xs font-bold tracking-wide">
+                        Membuat Dokumen via {selectedAgent === 'gemini' ? 'Gemini 2.5 Flash' : 'Custom AI'}...
+                      </span>
+                    </div>
+                    <span className="text-xs font-mono font-bold text-fuchsia-300">
+                      {progressPercent}%
+                    </span>
+                  </div>
+
+                  {/* Interactive Progress Bar */}
+                  <div className="w-full bg-purple-950/80 rounded-full h-3 overflow-hidden border border-purple-700/60 p-0.5">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-purple-500 via-fuchsia-500 to-pink-500 transition-all duration-300 relative overflow-hidden"
+                      style={{ width: `${Math.max(5, progressPercent)}%` }}
+                    >
+                      <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] text-purple-200">
+                    <span className="truncate max-w-[200px]">{progressStepText}</span>
+                    <span className="text-[10px] text-purple-300 font-mono">Target: {totalTargetPages} Hal</span>
+                  </div>
+
+                  {/* Prominent Stop Generate Button */}
+                  <button
+                    type="button"
+                    onClick={handleStopGenerate}
+                    className="w-full flex items-center justify-center gap-2 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
+                  >
+                    <Square className="w-3.5 h-3.5 fill-white" />
+                    <span>Stop Generate (Hentikan)</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleGenerateAI}
+                  disabled={!activeDoc.title.trim()}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 via-fuchsia-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 rounded-xl shadow-md shadow-purple-500/20 transition-all active:scale-95 cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4 text-fuchsia-200" />
+                  <span>Generate Otomatis via AI ({totalTargetPages} Halaman)</span>
+                </button>
+              )}
 
               <button
                 type="button"
                 onClick={handleOpenPrompt}
-                className="w-full flex items-center justify-center gap-1.5 py-2 text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl transition-colors"
+                className="w-full flex items-center justify-center gap-1.5 py-2 text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl transition-colors cursor-pointer"
               >
                 <Copy className="w-3.5 h-3.5" />
-                Salin Prompt Manual (untuk ChatGPT / Gemini Web)
+                <span>Salin Prompt Manual (untuk ChatGPT / Gemini Web)</span>
               </button>
             </div>
           </div>
         </div>
 
-        {/* PANEL KANAN: Lembar Kerja A4 Presisi & Live Document Preview (7 Kolom) */}
+        {/* PANEL KANAN: Lembar Kerja A4 Presisi (Single Page View Default) */}
         <div className="lg:col-span-7 space-y-3">
-          {/* Paper View Controls & Multi-Page Selector */}
-          <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3 text-xs no-print">
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-slate-800 flex items-center gap-1.5">
+          {/* Paper View Controls: Ukuran Kertas, Margin, Lihat Hasil, Tutorial, & Navigasi Halaman */}
+          <div className="bg-white p-3 sm:p-3.5 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3 text-xs no-print">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold text-slate-800 flex items-center gap-1.5 mr-1">
                 <Eye className="w-4 h-4 text-purple-600" />
-                Lembar Kerja Naskah Dinas (Arial)
+                Lembar Kerja (Hal {safeCurrentPage}/{totalTargetPages})
               </span>
-            </div>
 
-            {/* Page Selection Bar */}
-            <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
-              <span className="text-[10px] font-bold text-slate-500 px-1 uppercase tracking-wider">
-                Halaman:
-              </span>
+              {/* Tombol Lihat Hasil (Pop-up Preview) */}
               <button
                 type="button"
-                onClick={() => setSelectedPreviewPage('all')}
-                className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all ${
-                  selectedPreviewPage === 'all'
-                    ? 'bg-purple-600 text-white shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
-                }`}
+                onClick={() => {
+                  setGeneratedPreviewDoc(generatedPreviewDoc || activeDoc);
+                  setIsGeneratedPreviewModalOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-fuchsia-700 bg-fuchsia-50 hover:bg-fuchsia-100 border border-fuchsia-300 rounded-xl transition-all cursor-pointer shadow-2xs"
+                title="Buka kembali Pop-up Preview hasil generate AI"
               >
-                Semua ({totalTargetPages})
+                <Sparkles className="w-3.5 h-3.5 text-fuchsia-600" />
+                <span>Lihat Hasil</span>
               </button>
 
-              {Array.from({ length: totalTargetPages }, (_, i) => i + 1).map((pageNo) => (
-                <button
-                  key={pageNo}
-                  type="button"
-                  onClick={() => setSelectedPreviewPage(pageNo)}
-                  className={`w-7 h-6 text-xs font-semibold rounded-lg transition-all flex items-center justify-center ${
-                    selectedPreviewPage === pageNo
-                      ? 'bg-purple-600 text-white shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
-                  }`}
-                  title={`Tampilkan Lembar Halaman ${pageNo}`}
-                >
-                  {pageNo}
-                </button>
-              ))}
+              {/* Tombol Tutorial Penggunaan PuskesDoc */}
+              <button
+                type="button"
+                onClick={() => setIsTutorialOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl transition-all cursor-pointer"
+                title="Buka panduan lengkap penggunaan PuskesDoc"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-purple-600" />
+                <span>Tutorial Penggunaan</span>
+              </button>
 
-              <div className="flex items-center gap-0.5 pl-1 border-l border-slate-300">
-                <button
-                  type="button"
-                  disabled={selectedPreviewPage === 'all' || selectedPreviewPage === 1}
-                  onClick={() => {
-                    if (typeof selectedPreviewPage === 'number' && selectedPreviewPage > 1) {
-                      setSelectedPreviewPage(selectedPreviewPage - 1);
-                    }
-                  }}
-                  className="p-1 text-slate-600 hover:text-purple-600 disabled:opacity-30 rounded hover:bg-white"
-                  title="Halaman Sebelumnya"
+              {/* Tombol Cetak Langsung */}
+              <button
+                type="button"
+                onClick={handlePrint}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl transition-colors cursor-pointer"
+                title="Cetak Naskah Dinas ke Printer / PDF"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-600" />
+                <span>Cetak</span>
+              </button>
+            </div>
+
+            {/* Pengaturan Format Kertas, Margin & Navigasi Halaman */}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Pilihan Ukuran Kertas */}
+              <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded-xl border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase">Kertas:</span>
+                <select
+                  value={paperSize}
+                  onChange={(e) => setPaperSize(e.target.value as any)}
+                  className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
                 >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  disabled={selectedPreviewPage === 'all' || selectedPreviewPage === totalTargetPages}
-                  onClick={() => {
-                    if (typeof selectedPreviewPage === 'number' && selectedPreviewPage < totalTargetPages) {
-                      setSelectedPreviewPage(selectedPreviewPage + 1);
-                    }
-                  }}
-                  className="p-1 text-slate-600 hover:text-purple-600 disabled:opacity-30 rounded hover:bg-white"
-                  title="Halaman Selanjutnya"
+                  <option value="A4">A4 (210 x 297 mm)</option>
+                  <option value="F4">F4 / Folio (215 x 330 mm)</option>
+                  <option value="Letter">Letter (216 x 279 mm)</option>
+                </select>
+              </div>
+
+              {/* Pilihan Margin */}
+              <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded-xl border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase">Margin:</span>
+                <select
+                  value={marginPreset}
+                  onChange={(e) => setMarginPreset(e.target.value as any)}
+                  className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
                 >
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
+                  <option value="2,2,2,2">2, 2, 2, 2 cm (Standar)</option>
+                  <option value="4,3,3,3">4, 3, 3, 3 cm (Resmi Kemenkes)</option>
+                  <option value="custom">Kustom Margin...</option>
+                </select>
+              </div>
+
+              {/* Page Selection Bar (Clean Page Buttons & Arrows) */}
+              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 px-1 uppercase tracking-wider">
+                  Hal:
+                </span>
+
+                {Array.from({ length: totalTargetPages }, (_, i) => i + 1).map((pageNo) => (
+                  <button
+                    key={pageNo}
+                    type="button"
+                    onClick={() => setSelectedPreviewPage(pageNo)}
+                    className={`w-7 h-6 text-xs font-semibold rounded-lg transition-all flex items-center justify-center cursor-pointer ${
+                      safeCurrentPage === pageNo
+                        ? 'bg-purple-600 text-white shadow-2xs font-bold'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+                    }`}
+                    title={`Buka Halaman ${pageNo}`}
+                  >
+                    {pageNo}
+                  </button>
+                ))}
+
+                <div className="flex items-center gap-0.5 pl-1 border-l border-slate-300">
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage <= 1}
+                    onClick={() => setSelectedPreviewPage((prev) => Math.max(1, prev - 1))}
+                    className="p-1 text-slate-600 hover:text-purple-600 disabled:opacity-30 rounded hover:bg-white cursor-pointer"
+                    title="Halaman Sebelumnya"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage >= totalTargetPages}
+                    onClick={() => setSelectedPreviewPage((prev) => Math.min(totalTargetPages, prev + 1))}
+                    className="p-1 text-slate-600 hover:text-purple-600 disabled:opacity-30 rounded hover:bg-white cursor-pointer"
+                    title="Halaman Selanjutnya"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
 
-            <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none text-slate-600">
-              <input
-                type="checkbox"
-                checked={showResolvedValues}
-                onChange={(e) => setShowResolvedValues(e.target.checked)}
-                className="rounded text-purple-600 focus:ring-purple-500 h-3.5 w-3.5"
-              />
-              <span>Nilai Nyata Faskes</span>
-            </label>
+            {/* Custom Margin Sub-bar (if custom selected) */}
+            {marginPreset === 'custom' && (
+              <div className="w-full pt-2 border-t border-slate-100 flex flex-wrap items-center gap-3 bg-purple-50/50 p-2 rounded-xl text-xs text-slate-700 animate-in fade-in">
+                <span className="font-bold text-purple-900 text-[11px]">Atur Margin Kustom (cm):</span>
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px]">Atas:</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="6"
+                    step="0.5"
+                    value={customMargin.top}
+                    onChange={(e) => setCustomMargin({ ...customMargin, top: parseFloat(e.target.value) || 2 })}
+                    className="w-14 px-1.5 py-0.5 border border-purple-200 rounded bg-white text-center font-bold"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px]">Kiri:</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="6"
+                    step="0.5"
+                    value={customMargin.left}
+                    onChange={(e) => setCustomMargin({ ...customMargin, left: parseFloat(e.target.value) || 2 })}
+                    className="w-14 px-1.5 py-0.5 border border-purple-200 rounded bg-white text-center font-bold"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px]">Kanan:</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="6"
+                    step="0.5"
+                    value={customMargin.right}
+                    onChange={(e) => setCustomMargin({ ...customMargin, right: parseFloat(e.target.value) || 2 })}
+                    className="w-14 px-1.5 py-0.5 border border-purple-200 rounded bg-white text-center font-bold"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px]">Bawah:</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="6"
+                    step="0.5"
+                    value={customMargin.bottom}
+                    onChange={(e) => setCustomMargin({ ...customMargin, bottom: parseFloat(e.target.value) || 2 })}
+                    className="w-14 px-1.5 py-0.5 border border-purple-200 rounded bg-white text-center font-bold"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Real A4 Paper Simulation Container */}
+          {/* Real Paper Simulation Container (Always Single Page View) */}
           <div className="bg-slate-200/80 p-4 sm:p-6 rounded-2xl border border-slate-300 shadow-inner flex flex-col items-center gap-6 overflow-x-auto">
-            {/* If 'all' is selected: Render distinct stacked A4 sheets for each page */}
-            {selectedPreviewPage === 'all' ? (
-              Array.from({ length: totalTargetPages }, (_, pIdx) => {
-                const pageNumber = pIdx + 1;
-                const pageSections = activeDoc.sections.slice(
-                  pIdx * sectionsPerPage,
-                  (pIdx + 1) * sectionsPerPage
-                );
-
-                return (
-                  <div
-                    key={pageNumber}
-                    style={{
-                      fontFamily: 'Arial, sans-serif',
-                      width: '100%',
-                      maxWidth: '794px',
-                      minHeight: '1050px',
-                    }}
-                    className="a4-page bg-white text-slate-900 p-8 sm:p-12 shadow-xl rounded-sm border border-slate-300 space-y-6 leading-relaxed select-text flex flex-col justify-between"
-                  >
-                    <div className="space-y-5">
-                      {/* Page Header Indicator */}
-                      <div className="flex items-center justify-between text-[10px] text-slate-400 border-b border-slate-200 pb-1 font-mono no-print">
-                        <span>{activeDoc.title} · {activeDoc.docType}</span>
-                        <span>Lembar Kerja {pageNumber} dari {totalTargetPages}</span>
-                      </div>
-
-                      {/* If original DOCX HTML is available: Render authentic document appearance directly editable */}
-                      {activeDoc.originalDocxHtml ? (
-                        <div className="space-y-4">
-                          <div className="p-2.5 bg-pink-50 border border-pink-200 rounded-xl flex items-center justify-between text-xs text-pink-900 no-print">
-                            <span className="font-semibold flex items-center gap-1.5">
-                              <FileCheck className="w-4 h-4 text-pink-600" />
-                              Format Naskah Word Asli (.docx) — Tampilan Sesuai Aslinya
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => updateActiveTab({}, { ...activeDoc, originalDocxHtml: undefined })}
-                              className="text-[10px] text-pink-700 underline font-medium hover:text-pink-900"
-                            >
-                              Beralih ke Format Standar
-                            </button>
-                          </div>
-                          <div
-                            contentEditable={true}
-                            suppressContentEditableWarning={true}
-                            onInput={(e) => {
-                              updateActiveTab({}, { ...activeDoc, originalDocxHtml: e.currentTarget.innerHTML });
-                            }}
-                            dangerouslySetInnerHTML={{ __html: activeDoc.originalDocxHtml }}
-                            className="docx-document-content min-h-[750px] p-2 leading-relaxed select-text focus:outline-none focus:ring-1 focus:ring-purple-300 rounded cursor-text"
-                            title="Klik di sini untuk langsung mengedit naskah dokumen sesuai aslinya"
-                          />
-                        </div>
-                      ) : (
-                        <>
-                          {/* Halaman 1: Render KOP & Dokumen Header */}
-                          {pageNumber === 1 && (
-                            <>
-                              {/* 1. KOP SURAT */}
-                              {activeDoc.useKop && (
-                            (() => {
-                              const effectiveKopMode = activeDoc.kopMode || profile.kopMode || 'manual';
-
-                              // Mode 2: Gambar KOP Jadi
-                              if (effectiveKopMode === 'image') {
-                                if (profile.gambarKopJadi) {
-                                  return (
-                                    <div className="text-center border-b-2 border-slate-900 pb-2 mb-2">
-                                      <img
-                                        src={profile.gambarKopJadi}
-                                        alt="KOP Surat Resmi Jadi"
-                                        className="w-full max-h-36 object-contain mx-auto"
-                                      />
-                                    </div>
-                                  );
-                                }
-                                return (
-                                  <div className="space-y-2 mb-2">
-                                    <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-center text-xs text-amber-800 no-print">
-                                      <span className="font-semibold block">⚠️ Mode Gambar KOP Terpilih (Berkas belum diunggah)</span>
-                                      <span className="text-[10px] text-amber-600 block mt-0.5">
-                                        Menampilkan KOP Teks Standar sementara. Unggah berkas gambar KOP di tab Profil Faskes.
-                                      </span>
-                                    </div>
-                                    <div className="text-center border-b-2 border-slate-900 pb-2">
-                                      <div className="flex items-center justify-between gap-3 px-2">
-                                        {profile.logoPemda && (
-                                          <img 
-                                            src={profile.logoPemda} 
-                                            alt="Pemda" 
-                                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                            className="w-14 h-14 object-contain" 
-                                          />
-                                        )}
-                                        <div className="flex-1 text-center">
-                                          <p className="text-[12px] font-bold text-slate-800 tracking-wider">{profile.pemerintahDaerah?.toUpperCase()}</p>
-                                          <p className="text-[13px] font-bold text-slate-900 tracking-wider">{profile.dinasKesehatan?.toUpperCase()}</p>
-                                          <p className="text-[15px] font-black text-slate-950 tracking-wider">{profile.namaPuskesmas?.toUpperCase()}</p>
-                                          <p className="text-[10px] text-slate-600 italic mt-0.5">{profile.alamat} · Telp: {profile.telepon}</p>
-                                        </div>
-                                        {profile.logoPuskesmas && (
-                                          <img 
-                                            src={profile.logoPuskesmas} 
-                                            alt="Puskesmas" 
-                                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                            className="w-14 h-14 object-contain" 
-                                          />
-                                        )}
-                                      </div>
-                                      <div className="border-b-2 border-slate-900 mt-2" />
-                                      <div className="border-b border-slate-900 mt-[1px]" />
-                                    </div>
-                                  </div>
-                                );
-                              }
-
-                              // Mode 1 & 3: Teks Baku Standar
-                              return (
-                                <div className="text-center border-b-2 border-slate-900 pb-2">
-                                  <div className="flex items-center justify-between gap-3 px-2">
-                                    {profile.logoPemda ? (
-                                      <img 
-                                        src={profile.logoPemda} 
-                                        alt="Pemda" 
-                                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                        className="w-14 h-14 object-contain" 
-                                      />
-                                    ) : <div className="w-14 h-14" />}
-                                    <div className="flex-1 text-center">
-                                      <p className="text-[12px] font-bold text-slate-800 tracking-wider">
-                                        {profile.pemerintahDaerah?.toUpperCase()}
-                                      </p>
-                                      <p className="text-[13px] font-bold text-slate-900 tracking-wider">
-                                        {profile.dinasKesehatan?.toUpperCase()}
-                                      </p>
-                                      <p className="text-[15px] font-black text-slate-950 tracking-wider">
-                                        {profile.namaPuskesmas?.toUpperCase()}
-                                      </p>
-                                      <p className="text-[10px] text-slate-600 italic mt-0.5">
-                                        {profile.alamat} · Telp: {profile.telepon} · Email: {profile.email}
-                                      </p>
-                                    </div>
-                                    {profile.logoPuskesmas ? (
-                                      <img 
-                                        src={profile.logoPuskesmas} 
-                                        alt="Puskesmas" 
-                                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                        className="w-14 h-14 object-contain" 
-                                      />
-                                    ) : <div className="w-14 h-14" />}
-                                  </div>
-                                  <div className="border-b-2 border-slate-900 mt-2" />
-                                  <div className="border-b border-slate-900 mt-[1px]" />
-                                </div>
-                              );
-                            })()
-                          )}
-
-                          {/* 2. DRAFT FORMAT: SOP KOTAK AKREDITASI */}
-                          {activeDoc.docType === 'SOP' && (
-                            <div className="space-y-4">
-                              <table className="w-full border-collapse border-2 border-slate-900 text-xs">
-                                <tbody>
-                                  <tr>
-                                    <td rowSpan={2} className="border-2 border-slate-900 p-3 text-center font-bold text-sm w-1/2 align-middle">
-                                      {activeDoc.title?.toUpperCase()}
-                                    </td>
-                                    <td className="border-2 border-slate-900 p-2 text-xs space-y-0.5 w-1/2">
-                                      <p><strong>No. Dokumen</strong> : {activeDoc.sopMetadata?.noDokumen || activeDoc.docNumber || '440/SOP/PKM/2026'}</p>
-                                      <p><strong>No. Revisi</strong>   : {activeDoc.sopMetadata?.noRevisi || '00'}</p>
-                                      <p><strong>SOP</strong></p>
-                                      <p><strong>Tanggal Terbit</strong>: {activeDoc.sopMetadata?.tanggalTerbit || new Date().toLocaleDateString('id-ID')}</p>
-                                      <p><strong>Halaman</strong>      : {`1/${totalTargetPages}`}</p>
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td className="border-2 border-slate-900 p-2 text-xs">
-                                      <p className="font-semibold">Ditetapkan Oleh:</p>
-                                      <p className="text-[11px]">{profile.jabatanKepala}</p>
-                                      <div className="h-10" />
-                                      <p className="font-bold underline text-xs">{profile.kepalaPuskesmas}</p>
-                                      <p className="text-[11px]">NIP. {profile.nipKepala}</p>
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td className="border-2 border-slate-900 p-2 text-center font-bold text-xs uppercase bg-slate-50">
-                                      {profile.namaPuskesmas}
-                                    </td>
-                                    <td className="border-2 border-slate-900 p-2 text-xs font-semibold bg-slate-50">
-                                      Unit/Klaster: {activeKlasterInfo.name}
-                                    </td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-
-                          {/* 2b. DRAFT FORMAT: SK KEPUTUSAN */}
-                          {activeDoc.docType === 'SK' && (
-                            <div className="text-center space-y-1.5 pb-2">
-                              <p className="text-sm font-bold tracking-wide">
-                                KEPUTUSAN KEPALA {profile.namaPuskesmas?.toUpperCase()}
-                              </p>
-                              <p className="text-xs font-bold font-mono">
-                                NOMOR : {activeDoc.docNumber || '440/012/SK/PKM.BBK/2026'}
-                              </p>
-                              <p className="text-xs font-bold pt-1">TENTANG</p>
-                              <p className="text-sm font-bold max-w-lg mx-auto pt-1 leading-snug">
-                                {activeDoc.title?.toUpperCase()}
-                              </p>
-                              <p className="text-xs font-bold pt-2">
-                                DENGAN RAHMAT TUHAN YANG MAHA ESA<br />
-                                KEPALA {profile.namaPuskesmas?.toUpperCase()},
-                              </p>
-                            </div>
-                          )}
-
-                          {/* 2c. DRAFT FORMAT: KAK / PEDOMAN / CUSTOM */}
-                          {activeDoc.docType !== 'SOP' && activeDoc.docType !== 'SK' && (
-                            <div className="text-center space-y-1 border-b border-slate-200 pb-3">
-                              <p className="text-sm font-bold tracking-wide">
-                                {activeDoc.docType === 'KAK' ? 'KERANGKA ACUAN KERJA (KAK)' : (activeDoc.customTypeName || activeDoc.title)?.toUpperCase()}
-                              </p>
-                              <p className="text-xs font-semibold text-slate-700">
-                                {activeDoc.title}
-                              </p>
-                              <p className="text-[11px] font-mono text-slate-500">
-                                {activeKlasterInfo.name} · Tahun {new Date().getFullYear()}
-                              </p>
-                            </div>
-                          )}
-                        </>
-                      )}
-
-                      {/* Halaman 2+: Running Header Naskah Dinas */}
-                      {pageNumber > 1 && (
-                        <div className="border-b border-slate-300 pb-2 text-[11px] flex items-center justify-between text-slate-700">
-                          <span className="font-bold truncate max-w-sm">{activeDoc.title}</span>
-                          <span className="font-mono">No: {activeDoc.docNumber || '440/PKM/2026'}</span>
-                        </div>
-                      )}
-
-                      {/* Sections for this page */}
-                      <div className="space-y-4 pt-1">
-                        {pageSections.map((sec, localIdx) => {
-                          const globalIdx = pIdx * sectionsPerPage + localIdx;
-                          return (
-                            <div key={sec.id} className="space-y-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <input
-                                  type="text"
-                                  value={sec.title}
-                                  onChange={(e) => {
-                                    const updated = [...activeDoc.sections];
-                                    updated[globalIdx] = { ...sec, title: e.target.value };
-                                    updateActiveTab({}, { ...activeDoc, sections: updated });
-                                    handleInputCheckTrigger(e, `section_title_${globalIdx}`, globalIdx);
-                                  }}
-                                  onKeyUp={(e) => handleInputCheckTrigger(e, `section_title_${globalIdx}`, globalIdx)}
-                                  onKeyDown={handleInputKeyDown}
-                                  className="text-xs font-bold text-slate-900 bg-transparent hover:bg-slate-100 focus:bg-white border border-transparent focus:border-purple-300 rounded px-1 py-0.5 flex-1"
-                                  placeholder="Judul Bagian"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    const rect = e.currentTarget.getBoundingClientRect();
-                                    setAutocomplete({
-                                      isOpen: true,
-                                      query: '',
-                                      fieldId: `section_${globalIdx}`,
-                                      sectionIdx: globalIdx,
-                                      cursorIndex: sec.content.length,
-                                      position: { top: rect.bottom, left: Math.max(16, rect.left - 150) },
-                                      selectedIndex: 0,
-                                    });
-                                  }}
-                                  className="text-[10px] font-mono font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-1.5 py-0.5 rounded transition-all no-print flex items-center gap-1 shrink-0"
-                                  title="Sisipkan variabel ke bagian ini"
-                                >
-                                  <Variable className="w-3 h-3" />
-                                  <span>{`{{ }}`}</span>
-                                </button>
-                              </div>
-
-                              {/* Bracket Prompt [...] Detection & One-Click AI Execution */}
-                              {sec.content.includes('[') && sec.content.includes(']') && (
-                                <div className="flex items-center justify-between p-2 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg text-purple-900 text-[11px] font-semibold animate-fade-in no-print">
-                                  <span className="flex items-center gap-1.5 min-w-0 flex-1 truncate">
-                                    <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                                    <span className="truncate">Perintah AI <code>[...]</code> terdeteksi di bagian ini</span>
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleExecuteBracketPrompt(globalIdx)}
-                                    disabled={executingBracketIdx === globalIdx}
-                                    className="shrink-0 px-2.5 py-1 text-[10px] font-bold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-md shadow-2xs flex items-center gap-1 transition-all"
-                                  >
-                                    {executingBracketIdx === globalIdx ? (
-                                      <>
-                                        <RefreshCw className="w-3 h-3 animate-spin" />
-                                        <span>Mengeksekusi...</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Sparkles className="w-3 h-3 text-pink-300" />
-                                        <span>Jalankan Prompt [...] via AI</span>
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
-                              )}
-
-                              <textarea
-                                rows={Math.max(2, sec.content.split('\n').length + 1)}
-                                value={showResolvedValues && focusedField !== `section_${globalIdx}` ? substituteVariables(sec.content, variables) : sec.content}
-                                onFocus={() => setFocusedField(`section_${globalIdx}`)}
-                                onBlur={() => setFocusedField(null)}
-                                onChange={(e) => {
-                                  handleSectionContentChange(globalIdx, e.target.value);
-                                  handleInputCheckTrigger(e, `section_${globalIdx}`, globalIdx);
-                                }}
-                                onKeyUp={(e) => handleInputCheckTrigger(e, `section_${globalIdx}`, globalIdx)}
-                                onKeyDown={handleInputKeyDown}
-                                placeholder="Tuliskan isi bagian dokumen. Ketik {{ untuk variabel, atau ketik [perintah untuk AI]..."
-                                className="w-full p-2 text-xs font-sans text-slate-800 bg-transparent hover:bg-slate-50 focus:bg-white border border-transparent hover:border-slate-200 focus:border-purple-400 rounded focus:outline-none leading-relaxed resize-y transition-colors"
-                              />
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      {/* Sign-off Block on Last Page */}
-                      {pageNumber === totalTargetPages && activeDoc.docType !== 'SOP' && (
-                        <div className="pt-6 flex justify-end">
-                          <div className="text-right text-xs space-y-0.5 w-64">
-                            <p>Ditetapkan di: {profile.kabupatenKota}</p>
-                            <p>Pada tanggal : {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
-                            <p className="font-bold pt-2">{profile.jabatanKepala?.toUpperCase()},</p>
-                            <div className="h-14" />
-                            <p className="font-bold underline text-xs">{profile.kepalaPuskesmas}</p>
-                            <p className="text-[11px]">NIP. {profile.nipKepala}</p>
-                          </div>
-                        </div>
-                      )}
-                        </>
-                      )}
-                    </div>
-
-                    {/* Bottom Page Footer */}
-                    <div className="border-t border-slate-200 pt-2 flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                      <span>{profile.namaPuskesmas} · Akreditasi ILP 2026</span>
-                      <span>Halaman {pageNumber} dari {totalTargetPages}</span>
-                    </div>
+            <div
+              style={{
+                fontFamily: 'Arial, sans-serif',
+                width: '100%',
+                maxWidth: paperDimensions.maxWidth,
+                minHeight: paperDimensions.minHeight,
+                paddingTop: `${activeMargins.top}cm`,
+                paddingBottom: `${activeMargins.bottom}cm`,
+                paddingLeft: `${activeMargins.left}cm`,
+                paddingRight: `${activeMargins.right}cm`,
+              }}
+              className="a4-page bg-white text-slate-900 shadow-xl rounded-sm border border-slate-300 space-y-6 leading-relaxed select-text flex flex-col justify-between relative"
+            >
+              <div className="space-y-5">
+                {/* Top Page Number if positioned at top */}
+                {activeDoc.showPageNumber !== false && (activeDoc.pageNumberPosition === 'top-right' || activeDoc.pageNumberPosition === 'top-center') && (
+                  <div className={`text-[10px] text-slate-500 font-mono pb-1 border-b border-slate-100 ${
+                    activeDoc.pageNumberPosition === 'top-center' ? 'text-center' : 'text-right'
+                  }`}>
+                    Halaman {safeCurrentPage} dari {totalTargetPages}
                   </div>
-                );
-              })
-            ) : (
-              /* Single Selected Page Preview */
-              (() => {
-                const pageNumber = typeof selectedPreviewPage === 'number' ? selectedPreviewPage : 1;
-                const pageSections = activeDoc.sections.slice(
-                  (pageNumber - 1) * sectionsPerPage,
-                  pageNumber * sectionsPerPage
-                );
+                )}
 
-                return (
-                  <div
-                    style={{
-                      fontFamily: 'Arial, sans-serif',
-                      width: '100%',
-                      maxWidth: '794px',
-                      minHeight: '1050px',
-                    }}
-                    className="a4-page bg-white text-slate-900 p-8 sm:p-12 shadow-xl rounded-sm border border-slate-300 space-y-6 leading-relaxed select-text flex flex-col justify-between"
-                  >
-                    <div className="space-y-5">
-                      {/* Page Header */}
-                      <div className="flex items-center justify-between text-[10px] text-slate-400 border-b border-slate-200 pb-1 font-mono no-print">
-                        <span>{activeDoc.title} · {activeDoc.docType}</span>
-                        <span className="font-bold text-purple-700">Fokus Lembar Halaman {pageNumber} dari {totalTargetPages}</span>
-                      </div>
+                {/* If original DOCX HTML is available: Render authentic document appearance directly editable */}
+                {activeDoc.originalDocxHtml ? (
+                  <div className="space-y-4">
+                    <div className="p-2.5 bg-pink-50 border border-pink-200 rounded-xl flex items-center justify-between text-xs text-pink-900 no-print">
+                      <span className="font-semibold flex items-center gap-1.5">
+                        <FileCheck className="w-4 h-4 text-pink-600" />
+                        Format Naskah Word Asli (.docx) — Tampilan Sesuai Aslinya
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => updateActiveTab({}, { ...activeDoc, originalDocxHtml: undefined })}
+                        className="text-[10px] text-pink-700 underline font-medium hover:text-pink-900 cursor-pointer"
+                      >
+                        Beralih ke Format Standar
+                      </button>
+                    </div>
+                    <div
+                      contentEditable={true}
+                      suppressContentEditableWarning={true}
+                      onInput={(e) => {
+                        updateActiveTab({}, { ...activeDoc, originalDocxHtml: e.currentTarget.innerHTML });
+                      }}
+                      dangerouslySetInnerHTML={{ __html: activeDoc.originalDocxHtml }}
+                      className="docx-document-content min-h-[750px] p-2 leading-relaxed select-text focus:outline-none focus:ring-1 focus:ring-purple-300 rounded cursor-text"
+                      title="Klik di sini untuk langsung mengedit naskah dokumen sesuai aslinya"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    {/* Halaman 1: Render KOP & Dokumen Header */}
+                    {safeCurrentPage === 1 && (
+                      <>
+                        {/* 1. KOP SURAT */}
+                        {activeDoc.useKop && (
+                          (() => {
+                            const effectiveKopMode = activeDoc.kopMode || profile.kopMode || 'manual';
 
-                      {/* If original DOCX HTML is available: Render authentic document appearance directly editable */}
-                      {activeDoc.originalDocxHtml ? (
-                        <div className="space-y-4">
-                          <div className="p-2.5 bg-pink-50 border border-pink-200 rounded-xl flex items-center justify-between text-xs text-pink-900 no-print">
-                            <span className="font-semibold flex items-center gap-1.5">
-                              <FileCheck className="w-4 h-4 text-pink-600" />
-                              Format Naskah Word Asli (.docx) — Tampilan Sesuai Aslinya
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => updateActiveTab({}, { ...activeDoc, originalDocxHtml: undefined })}
-                              className="text-[10px] text-pink-700 underline font-medium hover:text-pink-900"
-                            >
-                              Beralih ke Format Standar
-                            </button>
-                          </div>
-                          <div
-                            contentEditable={true}
-                            suppressContentEditableWarning={true}
-                            onBlur={(e) => {
-                              updateActiveTab({}, { ...activeDoc, originalDocxHtml: e.currentTarget.innerHTML });
-                            }}
-                            dangerouslySetInnerHTML={{ __html: activeDoc.originalDocxHtml }}
-                            className="docx-document-content min-h-[750px] p-2 leading-relaxed select-text focus:outline-none focus:ring-1 focus:ring-purple-300 rounded cursor-text"
-                            title="Klik di sini untuk langsung mengedit naskah dokumen sesuai aslinya"
-                          />
-                        </div>
-                      ) : (
-                        <>
-                          {/* If Page 1: Render KOP and Document Heading */}
-                          {pageNumber === 1 && (
-                            <>
-                              {/* 1. KOP SURAT */}
-                              {activeDoc.useKop && (
-                                (() => {
-                                  const effectiveKopMode = activeDoc.kopMode || profile.kopMode || 'manual';
-
-                              if (effectiveKopMode === 'image' && profile.gambarKopJadi) {
+                            // Mode 2: Gambar KOP Jadi
+                            if (effectiveKopMode === 'image') {
+                              if (profile.gambarKopJadi) {
                                 return (
                                   <div className="text-center border-b-2 border-slate-900 pb-2 mb-2">
                                     <img
@@ -1724,227 +1907,231 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
                                   </div>
                                 );
                               }
+                            }
 
-                              return (
-                                <div className="text-center border-b-2 border-slate-900 pb-2">
-                                  <div className="flex items-center justify-between gap-3 px-2">
-                                    {profile.logoPemda ? (
-                                      <img 
-                                        src={profile.logoPemda} 
-                                        alt="Pemda" 
-                                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                        className="w-14 h-14 object-contain" 
+                            // Mode 1: Manual Standard Text KOP with 2 Logos
+                            return (
+                              <div className="border-b-4 border-double border-slate-900 pb-3 mb-4 select-text">
+                                <div className="flex items-center justify-between gap-4">
+                                  <div className="w-16 h-16 shrink-0 flex items-center justify-center p-0.5">
+                                    {profile.logoPemda && (
+                                      <img
+                                        src={profile.logoPemda}
+                                        alt="Logo Pemda"
+                                        className="max-h-16 max-w-16 object-contain"
                                       />
-                                    ) : <div className="w-14 h-14" />}
-                                    <div className="flex-1 text-center">
-                                      <p className="text-[12px] font-bold text-slate-800 tracking-wider">
-                                        {profile.pemerintahDaerah?.toUpperCase()}
-                                      </p>
-                                      <p className="text-[13px] font-bold text-slate-900 tracking-wider">
-                                        {profile.dinasKesehatan?.toUpperCase()}
-                                      </p>
-                                      <p className="text-[15px] font-black text-slate-950 tracking-wider">
-                                        {profile.namaPuskesmas?.toUpperCase()}
-                                      </p>
-                                      <p className="text-[10px] text-slate-600 italic mt-0.5">
-                                        {profile.alamat} · Telp: {profile.telepon}
-                                      </p>
-                                    </div>
-                                    {profile.logoPuskesmas ? (
-                                      <img 
-                                        src={profile.logoPuskesmas} 
-                                        alt="Puskesmas" 
-                                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                        className="w-14 h-14 object-contain" 
-                                      />
-                                    ) : <div className="w-14 h-14" />}
+                                    )}
                                   </div>
-                                  <div className="border-b-2 border-slate-900 mt-2" />
-                                  <div className="border-b border-slate-900 mt-[1px]" />
+                                  <div className="text-center flex-1 space-y-0.5 leading-tight">
+                                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                                      {substituteVariables(profile.pemerintahDaerah, variables)}
+                                    </h3>
+                                    <h2 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                                      {substituteVariables(profile.dinasKesehatan, variables)}
+                                    </h2>
+                                    <h1 className="text-sm sm:text-base font-black uppercase tracking-widest text-slate-950">
+                                      {substituteVariables(profile.namaPuskesmas, variables)}
+                                    </h1>
+                                    <p className="text-[10px] text-slate-600 font-normal">
+                                      {substituteVariables(profile.alamat, variables)}, {profile.kecamatan}, {profile.kabupatenKota}
+                                    </p>
+                                    <p className="text-[9px] text-slate-500 font-mono">
+                                      Telp: {profile.telepon || '-'} | Email: {profile.email || '-'}
+                                    </p>
+                                  </div>
+                                  <div className="w-16 h-16 shrink-0 flex items-center justify-center p-0.5">
+                                    {profile.logoPuskesmas && (
+                                      <img
+                                        src={profile.logoPuskesmas}
+                                        alt="Logo Puskesmas"
+                                        className="max-h-16 max-w-16 object-contain"
+                                      />
+                                    )}
+                                  </div>
                                 </div>
-                              );
-                            })()
-                          )}
+                              </div>
+                            );
+                          })()
+                        )}
 
-                          {/* SOP Kotak Akreditasi */}
-                          {activeDoc.docType === 'SOP' && (
-                            <table className="w-full border-collapse border-2 border-slate-900 text-xs">
-                              <tbody>
-                                <tr>
-                                  <td rowSpan={2} className="border-2 border-slate-900 p-3 text-center font-bold text-sm w-1/2 align-middle">
-                                    {activeDoc.title?.toUpperCase()}
-                                  </td>
-                                  <td className="border-2 border-slate-900 p-2 text-xs space-y-0.5 w-1/2">
-                                    <p><strong>No. Dokumen</strong> : {activeDoc.sopMetadata?.noDokumen || activeDoc.docNumber || '440/SOP/PKM/2026'}</p>
-                                    <p><strong>No. Revisi</strong>   : {activeDoc.sopMetadata?.noRevisi || '00'}</p>
-                                    <p><strong>SOP</strong></p>
-                                    <p><strong>Tanggal Terbit</strong>: {activeDoc.sopMetadata?.tanggalTerbit || new Date().toLocaleDateString('id-ID')}</p>
-                                    <p><strong>Halaman</strong>      : {`1/${totalTargetPages}`}</p>
-                                  </td>
-                                </tr>
-                                <tr>
-                                  <td className="border-2 border-slate-900 p-2 text-xs">
-                                    <p className="font-semibold">Ditetapkan Oleh:</p>
-                                    <p className="text-[11px]">{profile.jabatanKepala}</p>
-                                    <div className="h-10" />
-                                    <p className="font-bold underline text-xs">{profile.kepalaPuskesmas}</p>
-                                    <p className="text-[11px]">NIP. {profile.nipKepala}</p>
-                                  </td>
-                                </tr>
-                                <tr>
-                                  <td className="border-2 border-slate-900 p-2 text-center font-bold text-xs uppercase bg-slate-50">
-                                    {profile.namaPuskesmas}
-                                  </td>
-                                  <td className="border-2 border-slate-900 p-2 text-xs font-semibold bg-slate-50">
-                                    Unit/Klaster: {activeKlasterInfo.name}
-                                  </td>
-                                </tr>
-                              </tbody>
-                            </table>
-                          )}
-
-                          {/* SK Keputusan */}
-                          {activeDoc.docType === 'SK' && (
-                            <div className="text-center space-y-1.5 pb-2">
-                              <p className="text-sm font-bold tracking-wide">
-                                KEPUTUSAN KEPALA {profile.namaPuskesmas?.toUpperCase()}
-                              </p>
-                              <p className="text-xs font-bold font-mono">
-                                NOMOR : {activeDoc.docNumber || '440/012/SK/PKM.BBK/2026'}
-                              </p>
-                              <p className="text-xs font-bold pt-1">TENTANG</p>
-                              <p className="text-sm font-bold max-w-lg mx-auto pt-1 leading-snug">
-                                {activeDoc.title?.toUpperCase()}
-                              </p>
+                        {/* 2. Format SOP Kotak Akreditasi Resmi Kemenkes */}
+                        {activeDoc.docType === 'SOP' ? (
+                          <div className="border-2 border-slate-900 text-xs mb-4 select-text">
+                            <div className="grid grid-cols-12 border-b border-slate-900">
+                              <div className="col-span-6 p-3 border-r border-slate-900 flex flex-col justify-center text-center">
+                                <h2 className="text-xs font-black uppercase tracking-tight text-slate-900">
+                                  {activeDoc.title}
+                                </h2>
+                                <p className="text-[10px] font-bold text-indigo-950 mt-1">
+                                  STANDAR OPERASIONAL PROSEDUR
+                                </p>
+                              </div>
+                              <div className="col-span-6 divide-y divide-slate-900 text-[11px]">
+                                <div className="grid grid-cols-12 p-1">
+                                  <span className="col-span-5 font-semibold text-slate-700">No. Dokumen</span>
+                                  <span className="col-span-7 font-mono font-bold">: {activeDoc.docNumber || '440/SOP/PKM/2026'}</span>
+                                </div>
+                                <div className="grid grid-cols-12 p-1">
+                                  <span className="col-span-5 font-semibold text-slate-700">No. Revisi</span>
+                                  <span className="col-span-7 font-mono">: {activeDoc.sopMetadata?.noRevisi || '00'}</span>
+                                </div>
+                                <div className="grid grid-cols-12 p-1">
+                                  <span className="col-span-5 font-semibold text-slate-700">Tanggal Terbit</span>
+                                  <span className="col-span-7 font-mono">: {activeDoc.sopMetadata?.tanggalTerbit || new Date().toLocaleDateString('id-ID')}</span>
+                                </div>
+                                <div className="grid grid-cols-12 p-1">
+                                  <span className="col-span-5 font-semibold text-slate-700">Halaman</span>
+                                  <span className="col-span-7 font-mono">: {safeCurrentPage}/{totalTargetPages}</span>
+                                </div>
+                              </div>
                             </div>
-                          )}
-                        </>
-                      )}
+                            <div className="grid grid-cols-12">
+                              <div className="col-span-6 p-2 border-r border-slate-900 flex items-center justify-center font-bold text-center text-slate-900 uppercase">
+                                {substituteVariables(profile.namaPuskesmas, variables)}
+                              </div>
+                              <div className="col-span-6 p-2 text-center text-[11px] leading-tight space-y-1">
+                                <p className="text-[10px] text-slate-600">Ditetapkan oleh Penanggung Jawab,</p>
+                                <div className="h-4" />
+                                <p className="font-bold underline text-slate-900">{profile.kepalaPuskesmas}</p>
+                                <p className="text-[10px] font-mono text-slate-600">NIP. {profile.nipKepala}</p>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          /* Document Header for SK, KAK, Pedoman, dll */
+                          <div className="text-center space-y-1 pb-4 mb-2">
+                            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">
+                              {activeDoc.docType}
+                            </h2>
+                            <p className="text-base font-extrabold text-slate-950 uppercase leading-snug max-w-lg mx-auto">
+                              {activeDoc.title}
+                            </p>
+                            <p className="text-[11px] font-mono text-slate-500">
+                              {activeKlasterInfo.name} · Tahun {new Date().getFullYear()}
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    )}
 
-                      {/* If Page 2+: Running Header */}
-                      {pageNumber > 1 && (
-                        <div className="border-b border-slate-300 pb-2 text-[11px] flex items-center justify-between text-slate-700">
-                          <span className="font-bold truncate max-w-sm">{activeDoc.title}</span>
-                          <span className="font-mono">No: {activeDoc.docNumber || '440/PKM/2026'}</span>
-                        </div>
-                      )}
+                    {/* Sections for this specific single page */}
+                    <div className="space-y-4 pt-1">
+                      {currentPageSections.map((sec, localIdx) => {
+                        const globalIdx = (safeCurrentPage - 1) * sectionsPerPage + localIdx;
+                        return (
+                          <div key={sec.id} className="space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <input
+                                type="text"
+                                value={sec.title}
+                                onChange={(e) => {
+                                  const updated = [...activeDoc.sections];
+                                  updated[globalIdx] = { ...sec, title: e.target.value };
+                                  updateActiveTab({}, { ...activeDoc, sections: updated });
+                                  handleInputCheckTrigger(e, `section_title_${globalIdx}`, globalIdx);
+                                }}
+                                onKeyUp={(e) => handleInputCheckTrigger(e, `section_title_${globalIdx}`, globalIdx)}
+                                onKeyDown={handleInputKeyDown}
+                                className="text-xs font-bold text-slate-900 bg-transparent hover:bg-slate-100 focus:bg-white border border-transparent focus:border-purple-300 rounded px-1 py-0.5 flex-1"
+                                placeholder="Judul Bagian"
+                              />
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setAutocomplete({
+                                    isOpen: true,
+                                    query: '',
+                                    fieldId: `section_${globalIdx}`,
+                                    sectionIdx: globalIdx,
+                                    cursorIndex: sec.content.length,
+                                    position: { top: rect.bottom, left: Math.max(16, rect.left - 150) },
+                                    selectedIndex: 0,
+                                  });
+                                }}
+                                className="text-[10px] font-mono font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-1.5 py-0.5 rounded transition-all no-print flex items-center gap-1 shrink-0 cursor-pointer"
+                                title="Sisipkan variabel ke bagian ini"
+                              >
+                                <Variable className="w-3 h-3" />
+                                <span>{`{{ }}`}</span>
+                              </button>
+                            </div>
 
-                      {/* Sections */}
-                      <div className="space-y-4 pt-1">
-                        {pageSections.map((sec, localIdx) => {
-                          const globalIdx = (pageNumber - 1) * sectionsPerPage + localIdx;
-                          return (
-                            <div key={sec.id} className="space-y-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <input
-                                  type="text"
-                                  value={sec.title}
-                                  onChange={(e) => {
-                                    const updated = [...activeDoc.sections];
-                                    updated[globalIdx] = { ...sec, title: e.target.value };
-                                    updateActiveTab({}, { ...activeDoc, sections: updated });
-                                    handleInputCheckTrigger(e, `section_title_${globalIdx}`, globalIdx);
-                                  }}
-                                  onKeyUp={(e) => handleInputCheckTrigger(e, `section_title_${globalIdx}`, globalIdx)}
-                                  onKeyDown={handleInputKeyDown}
-                                  className="text-xs font-bold text-slate-900 bg-transparent hover:bg-slate-100 focus:bg-white border border-transparent focus:border-purple-300 rounded px-1 py-0.5 flex-1"
-                                  placeholder="Judul Bagian"
-                                />
+                            {/* Bracket Prompt [...] Detection & One-Click AI Execution */}
+                            {sec.content.includes('[') && sec.content.includes(']') && (
+                              <div className="flex items-center justify-between p-2 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg text-purple-900 text-[11px] font-semibold animate-fade-in no-print">
+                                <span className="flex items-center gap-1.5 min-w-0 flex-1 truncate">
+                                  <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                                  <span className="truncate">Perintah AI <code>[...]</code> terdeteksi di bagian ini</span>
+                                </span>
                                 <button
                                   type="button"
-                                  onClick={(e) => {
-                                    const rect = e.currentTarget.getBoundingClientRect();
-                                    setAutocomplete({
-                                      isOpen: true,
-                                      query: '',
-                                      fieldId: `section_${globalIdx}`,
-                                      sectionIdx: globalIdx,
-                                      cursorIndex: sec.content.length,
-                                      position: { top: rect.bottom, left: Math.max(16, rect.left - 150) },
-                                      selectedIndex: 0,
-                                    });
-                                  }}
-                                  className="text-[10px] font-mono font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-1.5 py-0.5 rounded transition-all no-print flex items-center gap-1 shrink-0"
-                                  title="Sisipkan variabel ke bagian ini"
+                                  onClick={() => handleExecuteBracketPrompt(globalIdx)}
+                                  disabled={executingBracketIdx === globalIdx}
+                                  className="shrink-0 px-2.5 py-1 text-[10px] font-bold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-md shadow-2xs flex items-center gap-1 transition-all cursor-pointer"
                                 >
-                                  <Variable className="w-3 h-3" />
-                                  <span>{`{{ }}`}</span>
+                                  {executingBracketIdx === globalIdx ? (
+                                    <>
+                                      <RefreshCw className="w-3 h-3 animate-spin" />
+                                      <span>Mengeksekusi...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Sparkles className="w-3 h-3 text-pink-300" />
+                                      <span>Jalankan Prompt [...] via AI</span>
+                                    </>
+                                  )}
                                 </button>
                               </div>
+                            )}
 
-                              {/* Bracket Prompt [...] Detection & One-Click AI Execution */}
-                              {sec.content.includes('[') && sec.content.includes(']') && (
-                                <div className="flex items-center justify-between p-2 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg text-purple-900 text-[11px] font-semibold animate-fade-in no-print">
-                                  <span className="flex items-center gap-1.5 min-w-0 flex-1 truncate">
-                                    <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                                    <span className="truncate">Perintah AI <code>[...]</code> terdeteksi di bagian ini</span>
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleExecuteBracketPrompt(globalIdx)}
-                                    disabled={executingBracketIdx === globalIdx}
-                                    className="shrink-0 px-2.5 py-1 text-[10px] font-bold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-md shadow-2xs flex items-center gap-1 transition-all"
-                                  >
-                                    {executingBracketIdx === globalIdx ? (
-                                      <>
-                                        <RefreshCw className="w-3 h-3 animate-spin" />
-                                        <span>Mengeksekusi...</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Sparkles className="w-3 h-3 text-pink-300" />
-                                        <span>Jalankan Prompt [...] via AI</span>
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
-                              )}
-
-                              <textarea
-                                rows={Math.max(2, sec.content.split('\n').length + 1)}
-                                value={showResolvedValues && focusedField !== `section_${globalIdx}` ? substituteVariables(sec.content, variables) : sec.content}
-                                onFocus={() => setFocusedField(`section_${globalIdx}`)}
-                                onBlur={() => setFocusedField(null)}
-                                onChange={(e) => {
-                                  handleSectionContentChange(globalIdx, e.target.value);
-                                  handleInputCheckTrigger(e, `section_${globalIdx}`, globalIdx);
-                                }}
-                                onKeyUp={(e) => handleInputCheckTrigger(e, `section_${globalIdx}`, globalIdx)}
-                                onKeyDown={handleInputKeyDown}
-                                placeholder="Tuliskan isi bagian dokumen. Ketik {{ untuk variabel, atau ketik [perintah untuk AI]..."
-                                className="w-full p-2 text-xs font-sans text-slate-800 bg-transparent hover:bg-slate-50 focus:bg-white border border-transparent hover:border-slate-200 focus:border-purple-400 rounded focus:outline-none leading-relaxed resize-y transition-colors"
-                              />
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      {/* Sign-off if last page */}
-                      {pageNumber === totalTargetPages && activeDoc.docType !== 'SOP' && (
-                        <div className="pt-6 flex justify-end">
-                          <div className="text-right text-xs space-y-0.5 w-64">
-                            <p>Ditetapkan di: {profile.kabupatenKota}</p>
-                            <p>Pada tanggal : {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
-                            <p className="font-bold pt-2">{profile.jabatanKepala?.toUpperCase()},</p>
-                            <div className="h-14" />
-                            <p className="font-bold underline text-xs">{profile.kepalaPuskesmas}</p>
-                            <p className="text-[11px]">NIP. {profile.nipKepala}</p>
+                            <textarea
+                              rows={Math.max(2, sec.content.split('\n').length + 1)}
+                              value={sec.content}
+                              onFocus={() => setFocusedField(`section_${globalIdx}`)}
+                              onBlur={() => setFocusedField(null)}
+                              onChange={(e) => {
+                                handleSectionContentChange(globalIdx, e.target.value);
+                                handleInputCheckTrigger(e, `section_${globalIdx}`, globalIdx);
+                              }}
+                              onKeyUp={(e) => handleInputCheckTrigger(e, `section_${globalIdx}`, globalIdx)}
+                              onKeyDown={handleInputKeyDown}
+                              placeholder="Tuliskan isi bagian dokumen atau ketik [perintah untuk AI]..."
+                              className="w-full p-2 text-xs font-sans text-slate-800 bg-transparent hover:bg-slate-50 focus:bg-white border border-transparent hover:border-slate-200 focus:border-purple-400 rounded focus:outline-none leading-relaxed resize-y transition-colors"
+                            />
                           </div>
-                        </div>
-                      )}
-                        </>
-                      )}
+                        );
+                      })}
                     </div>
 
-                    {/* Bottom Page Footer */}
-                    <div className="border-t border-slate-200 pt-2 flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                      <span>{profile.namaPuskesmas} · Akreditasi ILP 2026</span>
-                      <span>Halaman {pageNumber} dari {totalTargetPages}</span>
-                    </div>
-                  </div>
-                );
-              })()
-            )}
+                    {/* Sign-off if last page */}
+                    {safeCurrentPage === totalTargetPages && activeDoc.docType !== 'SOP' && (
+                      <div className="pt-6 flex justify-end">
+                        <div className="text-right text-xs space-y-0.5 w-64">
+                          <p>Ditetapkan di: {profile.kabupatenKota}</p>
+                          <p>Pada tanggal : {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                          <p className="font-bold pt-2">{profile.jabatanKepala?.toUpperCase()},</p>
+                          <div className="h-14" />
+                          <p className="font-bold underline text-xs">{profile.kepalaPuskesmas}</p>
+                          <p className="text-[11px]">NIP. {profile.nipKepala}</p>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Bottom Page Number Position (no generic footer) */}
+              {activeDoc.showPageNumber !== false && (activeDoc.pageNumberPosition !== 'top-right' && activeDoc.pageNumberPosition !== 'top-center') && (
+                <div className={`text-[10px] text-slate-500 font-mono pt-3 border-t border-slate-100 ${
+                  activeDoc.pageNumberPosition === 'bottom-center' ? 'text-center' :
+                  activeDoc.pageNumberPosition === 'bottom-left' ? 'text-left' :
+                  'text-right'
+                }`}>
+                  Halaman {safeCurrentPage} dari {totalTargetPages}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1974,6 +2161,11 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
               return (
                 <div
                   key={v.id}
+                  ref={(el) => {
+                    if (isSelected && el) {
+                      el.scrollIntoView({ block: 'nearest' });
+                    }
+                  }}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     insertVariableTag(v.key);
@@ -2004,20 +2196,295 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({
           </div>
 
           <div className="px-3 py-1.5 bg-slate-100 text-[10px] text-slate-500 flex items-center justify-between border-t border-slate-200">
-            <span>Ketik manual atau tekan <strong>Esc</strong> untuk tutup</span>
+            <span>Tekan <strong>Esc</strong> untuk tutup</span>
             <button
               type="button"
               onMouseDown={(e) => {
                 e.preventDefault();
                 setAutocomplete((prev) => ({ ...prev, isOpen: false }));
               }}
-              className="text-slate-400 hover:text-slate-700 font-bold"
+              className="text-slate-400 hover:text-slate-700 font-bold cursor-pointer"
             >
               ✕
             </button>
           </div>
         </div>
       )}
+
+      {/* POPUP PREVIEW HASIL GENERATE (WITH SAVE TO MEDIA & DOWNLOAD) */}
+      <GeneratedPreviewModal
+        isOpen={isGeneratedPreviewModalOpen}
+        onClose={() => setIsGeneratedPreviewModalOpen(false)}
+        generatedDoc={generatedPreviewDoc}
+        profile={profile}
+        onApplyToEditor={(doc) => {
+          updateActiveTab({}, doc);
+          setIsGeneratedPreviewModalOpen(false);
+        }}
+        onNotify={(msg) => triggerNotice(msg)}
+      />
+
+      {/* MODAL RIWAYAT DOKUMEN GENERATE */}
+      {isDocHistoryModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[85vh]">
+            <div className="bg-gradient-to-r from-purple-700 to-indigo-700 p-5 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <History className="w-5 h-5 text-purple-200" />
+                <div>
+                  <h3 className="font-bold text-base">Riwayat Dokumen yang Pernah Digenerate</h3>
+                  <p className="text-xs text-purple-200">Log dokumen hasil generate sebelumnya</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsDocHistoryModalOpen(false)}
+                className="p-1 text-white/80 hover:text-white rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto flex-1 divide-y divide-slate-100">
+              {docHistoryList.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-400">
+                  Belum ada catatan riwayat dokumen.
+                </div>
+              ) : (
+                docHistoryList.map((hist) => (
+                  <div key={hist.id} className="py-3 flex items-center justify-between gap-3 hover:bg-slate-50 px-2 rounded-xl">
+                    <div className="min-w-0 flex-1">
+                      <span className="font-bold text-xs text-slate-800 block truncate">
+                        {hist.title}
+                      </span>
+                      <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
+                        <span className="font-mono bg-purple-100 text-purple-700 px-1.5 py-0.2 rounded font-bold">{hist.docType}</span>
+                        <span>{hist.klaster}</span>
+                        <span>·</span>
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-slate-400" />
+                          {new Date(hist.generatedAt).toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        updateActiveTab({}, { ...activeDoc, title: hist.title, docType: hist.docType as any });
+                        setIsDocHistoryModalOpen(false);
+                        triggerNotice(`Judul "${hist.title}" dimuat ke generator!`);
+                      }}
+                      className="px-3 py-1.5 text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg shrink-0 cursor-pointer"
+                    >
+                      Gunakan Judul
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex items-center justify-between text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm('Kosongkan riwayat dokumen generate?')) {
+                    clearDocHistory();
+                    setDocHistoryList([]);
+                    triggerNotice('Riwayat berhasil dikosongkan.');
+                  }
+                }}
+                className="text-rose-600 hover:text-rose-800 font-semibold cursor-pointer"
+              >
+                Hapus Semua Riwayat
+              </button>
+              <button
+                onClick={() => setIsDocHistoryModalOpen(false)}
+                className="px-4 py-1.5 font-bold text-slate-700 bg-slate-200 hover:bg-slate-300 rounded-lg cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
+// Helper: Generates Printable Multi-Page HTML with exact page numbering and A4 margins
+function generatePrintableDocumentHtml(
+  doc: PuskesDoc,
+  profile: FaskesProfile,
+  variables: VariableItem[],
+  totalTargetPages: number
+): string {
+  const sectionsPerPage = Math.max(1, Math.ceil(doc.sections.length / totalTargetPages));
+  const showPageNumber = doc.showPageNumber !== false;
+  const pageNumberPosition = doc.pageNumberPosition || 'bottom-right';
+
+  const positionStyles: Record<string, string> = {
+    'bottom-right': 'position: absolute; bottom: 15mm; right: 20mm;',
+    'bottom-center': 'position: absolute; bottom: 15mm; left: 0; right: 0; text-align: center;',
+    'bottom-left': 'position: absolute; bottom: 15mm; left: 20mm;',
+    'top-right': 'position: absolute; top: 15mm; right: 20mm;',
+    'top-center': 'position: absolute; top: 15mm; left: 0; right: 0; text-align: center;',
+  };
+
+  const pagesHtml = Array.from({ length: totalTargetPages }, (_, pIdx) => {
+    const pageNo = pIdx + 1;
+    const pageSections = doc.sections.slice(pIdx * sectionsPerPage, (pIdx + 1) * sectionsPerPage);
+
+    // KOP for page 1
+    let kopHtml = '';
+    if (pageNo === 1 && doc.useKop) {
+      const kopMode = doc.kopMode || profile.kopMode || 'manual';
+      if (kopMode === 'image' && profile.gambarKopJadi) {
+        kopHtml = `<div style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 16px;">
+          <img src="${profile.gambarKopJadi}" style="max-height: 120px; max-width: 100%;" />
+        </div>`;
+      } else {
+        kopHtml = `<div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 16px;">
+          <img src="${profile.logoPemda}" style="width: 65px; height: 65px; object-fit: contain;" />
+          <div style="text-align: center; flex: 1; padding: 0 10px;">
+            <div style="font-size: 11pt; font-weight: bold; letter-spacing: 0.5px;">${profile.pemerintahDaerah.toUpperCase()}</div>
+            <div style="font-size: 11pt; font-weight: bold;">${profile.dinasKesehatan.toUpperCase()}</div>
+            <div style="font-size: 14pt; font-weight: 900; letter-spacing: 1px;">${profile.namaPuskesmas.toUpperCase()}</div>
+            <div style="font-size: 8.5pt;">${profile.alamat}, ${profile.kecamatan}, ${profile.kabupatenKota}</div>
+            <div style="font-size: 8.5pt;">Telp: ${profile.telepon || '-'} | Email: ${profile.email || '-'}</div>
+          </div>
+          <img src="${profile.logoPuskesmas}" style="width: 65px; height: 65px; object-fit: contain;" />
+        </div>`;
+      }
+    }
+
+    // Title / SOP Box for page 1
+    let titleHtml = '';
+    if (pageNo === 1) {
+      if (doc.docType === 'SOP') {
+        titleHtml = `<table style="width: 100%; border-collapse: collapse; margin-bottom: 16px; border: 2px solid #000; font-size: 9.5pt;">
+          <tr>
+            <td rowspan="3" style="width: 50%; border: 1.5px solid #000; padding: 8px; text-align: center; vertical-align: middle;">
+              <div style="font-size: 12pt; font-weight: bold; margin-bottom: 4px;">${doc.title.toUpperCase()}</div>
+              <div style="font-weight: bold; color: #1e1b4b;">STANDAR OPERASIONAL PROSEDUR</div>
+            </td>
+            <td style="border: 1px solid #000; padding: 4px 8px; width: 25%;">No. Dokumen</td>
+            <td style="border: 1px solid #000; padding: 4px 8px;">${doc.docNumber || '440/SOP/PKM/2026'}</td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #000; padding: 4px 8px;">No. Revisi</td>
+            <td style="border: 1px solid #000; padding: 4px 8px;">${doc.sopMetadata?.noRevisi || '00'}</td>
+          </tr>
+          <tr>
+            <td style="border: 1px solid #000; padding: 4px 8px;">Tgl. Terbit</td>
+            <td style="border: 1px solid #000; padding: 4px 8px;">${doc.sopMetadata?.tanggalTerbit || new Date().toLocaleDateString('id-ID')}</td>
+          </tr>
+          <tr>
+            <td style="border: 1.5px solid #000; padding: 6px 8px; text-align: center;">
+              <strong>SOP</strong>
+            </td>
+            <td style="border: 1px solid #000; padding: 4px 8px;">Halaman</td>
+            <td style="border: 1px solid #000; padding: 4px 8px;">${pageNo}/${totalTargetPages}</td>
+          </tr>
+          <tr>
+            <td style="border: 1.5px solid #000; padding: 6px 8px; text-align: center;">
+              <strong>${profile.namaPuskesmas.toUpperCase()}</strong>
+            </td>
+            <td colspan="2" style="border: 1px solid #000; padding: 6px 8px; text-align: center;">
+              <div>Penanggung Jawab,</div>
+              <div style="font-weight: bold; text-decoration: underline; margin-top: 24px;">${profile.kepalaPuskesmas}</div>
+              <div style="font-size: 8.5pt;">NIP. ${profile.nipKepala}</div>
+            </td>
+          </tr>
+        </table>`;
+      } else {
+        titleHtml = `<div style="text-align: center; margin-bottom: 20px;">
+          <div style="font-size: 13pt; font-weight: 900; text-transform: uppercase;">${doc.title}</div>
+          <div style="font-size: 9.5pt; font-weight: bold; margin-top: 4px;">NOMOR: ${doc.docNumber || '440/PKM/2026'}</div>
+        </div>`;
+      }
+    }
+
+    // Sections
+    const sectionsHtml = pageSections.map((sec) => `
+      <div style="margin-bottom: 14px;">
+        <div style="font-weight: bold; font-size: 10pt; margin-bottom: 4px; border-bottom: 1px solid #ddd; padding-bottom: 2px;">
+          ${sec.title}
+        </div>
+        <div style="font-size: 9.5pt; line-height: 1.6; white-space: pre-wrap;">
+          ${substituteVariables(sec.content, variables)}
+        </div>
+      </div>
+    `).join('');
+
+    // Sign off if last page
+    let signOffHtml = '';
+    if (pageNo === totalTargetPages && doc.docType !== 'SOP') {
+      signOffHtml = `<div style="margin-top: 30px; display: flex; justify-content: flex-end;">
+        <div style="text-align: right; font-size: 9.5pt; line-height: 1.5; width: 250px;">
+          <div>Ditetapkan di: ${profile.kabupatenKota}</div>
+          <div>Pada tanggal: ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+          <div style="font-weight: bold; margin-top: 8px;">${profile.jabatanKepala.toUpperCase()},</div>
+          <div style="height: 50px;"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${profile.kepalaPuskesmas}</div>
+          <div style="font-size: 9pt;">NIP. ${profile.nipKepala}</div>
+        </div>
+      </div>`;
+    }
+
+    // Page number
+    const pageNumHtml = showPageNumber ? `
+      <div style="${positionStyles[pageNumberPosition] || positionStyles['bottom-right']} font-size: 9pt; font-family: monospace; color: #444;">
+        Halaman ${pageNo} dari ${totalTargetPages}
+      </div>
+    ` : '';
+
+    return `
+      <div class="print-page" style="page-break-after: always; position: relative; padding: 20mm; box-sizing: border-box; min-height: 297mm; max-height: 297mm;">
+        ${kopHtml}
+        ${titleHtml}
+        ${sectionsHtml}
+        ${signOffHtml}
+        ${pageNumHtml}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>${doc.title}</title>
+        <style>
+          @page {
+            size: A4;
+            margin: 0;
+          }
+          body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            color: #000;
+            background: #fff;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+          .print-page {
+            width: 210mm;
+            min-height: 297mm;
+            box-sizing: border-box;
+            background: #fff;
+          }
+          @media print {
+            .print-page {
+              page-break-after: always;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        ${pagesHtml}
+      </body>
+    </html>
+  `;
+}

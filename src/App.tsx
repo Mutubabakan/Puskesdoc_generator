@@ -8,18 +8,23 @@ import { MediaLibraryView } from './components/MediaLibraryView';
 import { DatabasePuskesmasView } from './components/DatabasePuskesmasView';
 import { PromptModal } from './components/PromptModal';
 import { CloudIntegrationModal } from './components/CloudIntegrationModal';
+import { LoginModal } from './components/LoginModal';
 import { 
   getStoredProfile, 
   saveProfile, 
   getStoredVariables, 
   saveVariables, 
   getStoredCustomTypes, 
-  saveCustomTypes 
+  saveCustomTypes,
+  getStoredUserAccount,
+  UserAccount
 } from './utils/storage';
 import { FaskesProfile, VariableItem, CustomDocTypeDefinition, PuskesDoc, DocumentTemplate, DocumentType, PuskesmasDatabaseItem } from './types';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<MainNavTab>('generator');
+  const [userAccount, setUserAccount] = useState<UserAccount>(getStoredUserAccount());
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [profile, setProfile] = useState<FaskesProfile>(getStoredProfile());
   const [variables, setVariables] = useState<VariableItem[]>(getStoredVariables());
   const [customTypes, setCustomTypes] = useState<CustomDocTypeDefinition[]>(getStoredCustomTypes());
@@ -152,6 +157,7 @@ export default function App() {
     setProfile(getStoredProfile());
     setVariables(getStoredVariables());
     setCustomTypes(getStoredCustomTypes());
+    setUserAccount(getStoredUserAccount());
   };
 
   return (
@@ -160,8 +166,9 @@ export default function App() {
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        onNewDoc={handleNewDoc}
         onOpenCloudModal={() => setIsCloudModalOpen(true)}
+        onOpenLoginModal={() => setIsLoginModalOpen(true)}
+        userAccount={userAccount}
       />
 
       {/* Main View Router */}
@@ -232,7 +239,7 @@ export default function App() {
         promptText={promptModalText}
       />
 
-      {/* Google Drive, Backup, & Multi-Agent AI Modal */}
+      {/* Google Drive, Backup, & Custom AI Modal */}
       <CloudIntegrationModal
         isOpen={isCloudModalOpen}
         onClose={() => setIsCloudModalOpen(false)}
@@ -243,6 +250,16 @@ export default function App() {
           setCurrentDoc(loadedDoc);
           setActiveTab('generator');
         }}
+      />
+
+      {/* Email Login & Google Drive Automatic Sync Modal */}
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        onLoginSuccess={(email) => {
+          setUserAccount(getStoredUserAccount());
+        }}
+        onDataRestored={handleDataRestored}
       />
     </div>
   );

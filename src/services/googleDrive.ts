@@ -146,3 +146,87 @@ export async function deleteDocFromGoogleDrive(accessToken: string, fileId: stri
 
   return res.ok || res.status === 204;
 }
+
+// Save Full Application Backup JSON to Google Drive
+export async function saveAppBackupToGoogleDrive(
+  accessToken: string,
+  backupJsonStr: string,
+  folderId?: string
+): Promise<{ success: boolean; fileId: string; fileName: string }> {
+  const targetFolderId = folderId || (await findOrCreateDriveFolder(accessToken));
+  const fileName = 'puskesdoc_full_backup.json';
+
+  // Search if backup file already exists
+  const query = encodeURIComponent(`name = '${fileName}' and '${targetFolderId}' in parents and trashed = false`);
+  const checkRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const checkData = await checkRes.json();
+
+  if (checkData.files && checkData.files.length > 0) {
+    const existingFileId = checkData.files[0].id;
+    const updateRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=media`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: backupJsonStr,
+    });
+    const updateData = await updateRes.json();
+    return { success: true, fileId: updateData.id || existingFileId, fileName };
+  }
+
+  // Create new multipart backup
+  const metadata = {
+    name: fileName,
+    parents: [targetFolderId],
+    mimeType: 'application/json',
+    description: 'Puskesdoc Complete Backup JSON (Profile, Variables, Database, Templates)',
+  };
+
+  const boundary = '-------314159265358979323846';
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+
+  const multipartRequestBody =
+    delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) +
+    delimiter +
+    'Content-Type: application/json\r\n\r\n' +
+    backupJsonStr +
+    closeDelimiter;
+
+  const createRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body: multipartRequestBody,
+  });
+
+  const createdFile = await createRes.json();
+  return { success: true, fileId: createdFile.id, fileName };
+}
+
+// Load Full Application Backup from Google Drive
+export async function loadLatestBackupFromGoogleDrive(accessToken: string): Promise<string | null> {
+  const folderId = await findOrCreateDriveFolder(accessToken);
+  const query = encodeURIComponent(`name = 'puskesdoc_full_backup.json' and '${folderId}' in parents and trashed = false`);
+  const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name,modifiedTime)`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const searchData = await searchRes.json();
+  if (!searchData.files || searchData.files.length === 0) {
+    return null;
+  }
+
+  const fileId = searchData.files[0].id;
+  const contentRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!contentRes.ok) return null;
+  return await contentRes.text();
+}

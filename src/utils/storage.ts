@@ -197,50 +197,6 @@ export const DEFAULT_MEDIA_ITEMS: MediaItem[] = [
     category: 'logo',
     description: 'Logo resmi Puskesmas Kementerian Kesehatan RI (Palang Hijau & Tetes Darah)',
   },
-  {
-    id: 'med_logo_pemda',
-    name: 'Lambang_Pemerintah_Daerah.svg',
-    type: 'image',
-    mimeType: 'image/svg+xml',
-    size: 2890,
-    dataUrl: DEFAULT_LOGO_PEMDA,
-    createdAt: new Date().toISOString(),
-    category: 'logo',
-    description: 'Lambang resmi Pemerintah Daerah Kabupaten/Kota untuk KOP Naskah Dinas',
-  },
-  {
-    id: 'med_stempel_resmi',
-    name: 'Stempel_Dinas_Puskesmas.svg',
-    type: 'image',
-    mimeType: 'image/svg+xml',
-    size: 3820,
-    dataUrl: DEFAULT_STEMPEL_PUSKESMAS,
-    createdAt: new Date().toISOString(),
-    category: 'stempel',
-    description: 'Cap stempel resmi dinas Puskesmas Babakan Terakreditasi Paripurna',
-  },
-  {
-    id: 'med_ttd_kepala',
-    name: 'Tanda_Tangan_dr_Ahmad_Fauzi.svg',
-    type: 'image',
-    mimeType: 'image/svg+xml',
-    size: 1650,
-    dataUrl: DEFAULT_TTD_KEPALA,
-    createdAt: new Date().toISOString(),
-    category: 'stempel',
-    description: 'Tanda tangan digital Kepala Puskesmas (dr. H. Ahmad Fauzi, M.M.Kes)',
-  },
-  {
-    id: 'med_form_blanko',
-    name: 'Blanko_Pemeriksaan_ANC_ILP_2026.docx',
-    type: 'document',
-    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    size: 14200,
-    dataUrl: 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEsDBBQAAAAIAAA=',
-    createdAt: new Date().toISOString(),
-    category: 'form',
-    description: 'Format baku blanko skrining rekam medis ANC 6 kali terpadu Klaster 2',
-  },
 ];
 
 export function getStoredMedia(): MediaItem[] {
@@ -339,8 +295,10 @@ export function exportBackupJSON(): string {
     customTypes: getStoredCustomTypes(),
     agentConfig: getStoredAgentConfig(),
     media: getStoredMedia(),
+    database: getStoredDatabase(),
+    docHistory: getStoredDocHistory(),
     exportedAt: new Date().toISOString(),
-    version: '1.0.0',
+    version: '1.1.0',
   };
   return JSON.stringify(data, null, 2);
 }
@@ -356,9 +314,100 @@ export function importBackupJSON(jsonStr: string): boolean {
     if (data.customTypes) saveCustomTypes(data.customTypes);
     if (data.agentConfig) saveAgentConfig(data.agentConfig);
     if (data.media) saveAllMedia(data.media);
+    if (data.database && Array.isArray(data.database)) saveAllDatabase(data.database);
+    if (data.docHistory && Array.isArray(data.docHistory)) localStorage.setItem(DOC_HISTORY_KEY, JSON.stringify(data.docHistory));
     return true;
   } catch (err) {
     console.error('Failed importing backup JSON', err);
     return false;
   }
+}
+
+// ==========================================
+// USER ACCOUNT & GOOGLE DRIVE AUTO-SYNC
+// ==========================================
+const USER_ACCOUNT_KEY = 'puskesdoc_user_account_v1';
+
+export interface UserAccount {
+  email: string;
+  name?: string;
+  isLoggedIn: boolean;
+  lastLoginAt?: string;
+  autoSyncGDrive?: boolean;
+}
+
+export function getStoredUserAccount(): UserAccount {
+  try {
+    const raw = localStorage.getItem(USER_ACCOUNT_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {
+    console.error('Failed reading user account', e);
+  }
+  return {
+    email: 'mutupuskesmasbabakan@gmail.com',
+    name: 'Petugas Mutu Puskesmas',
+    isLoggedIn: true, // Default active session for instant sync
+    autoSyncGDrive: true,
+  };
+}
+
+export function saveUserAccount(account: UserAccount): void {
+  localStorage.setItem(USER_ACCOUNT_KEY, JSON.stringify(account));
+}
+
+export function logoutUserAccount(): void {
+  saveUserAccount({
+    email: '',
+    name: '',
+    isLoggedIn: false,
+    autoSyncGDrive: false,
+  });
+}
+
+// ==========================================
+// GENERATED DOCUMENT HISTORY / LOG
+// ==========================================
+const DOC_HISTORY_KEY = 'puskesdoc_doc_history_v1';
+
+export interface DocHistoryItem {
+  id: string;
+  title: string;
+  docType: string;
+  klaster: string;
+  generatedAt: string;
+  targetPages: number;
+}
+
+export function getStoredDocHistory(): DocHistoryItem[] {
+  try {
+    const raw = localStorage.getItem(DOC_HISTORY_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {
+    console.error('Failed reading doc history', e);
+  }
+  return [
+    {
+      id: 'hist_anc_init',
+      title: 'Pelayanan Pemeriksaan Antenatal Care (ANC) Terpadu',
+      docType: 'SOP',
+      klaster: 'Klaster 2: Ibu dan Anak',
+      generatedAt: new Date().toISOString(),
+      targetPages: 2,
+    },
+  ];
+}
+
+export function saveDocHistoryItem(item: DocHistoryItem): void {
+  const history = getStoredDocHistory();
+  // Remove duplicate if same title
+  const filtered = history.filter((h) => h.title.trim().toLowerCase() !== item.title.trim().toLowerCase());
+  filtered.unshift(item);
+  localStorage.setItem(DOC_HISTORY_KEY, JSON.stringify(filtered.slice(0, 50))); // Keep last 50
+}
+
+export function clearDocHistory(): void {
+  localStorage.setItem(DOC_HISTORY_KEY, JSON.stringify([]));
 }

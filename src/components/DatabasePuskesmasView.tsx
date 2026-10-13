@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   Database,
   Plus,
@@ -14,11 +14,21 @@ import {
   Copy,
   Sparkles,
   Check,
-  X
+  X,
+  Upload,
+  Folder,
+  Wand2,
+  FileText,
+  RefreshCw,
+  Sliders,
+  Eye,
+  ChevronRight,
+  FileCheck
 } from 'lucide-react';
-import { PuskesmasDatabaseItem, DatabaseCategory, DatabaseMetric, IlpKlaster } from '../types';
-import { getStoredDatabase, saveDatabaseItem, deleteDatabaseItem, resetDatabaseToDefault } from '../utils/storage';
+import { PuskesmasDatabaseItem, DatabaseCategory, DatabaseMetric, IlpKlaster, MediaItem } from '../types';
+import { getStoredDatabase, saveDatabaseItem, deleteDatabaseItem, resetDatabaseToDefault, getStoredMedia, getStoredAgentConfig } from '../utils/storage';
 import { ILP_KLASTERS } from '../utils/constants';
+import { extractTextFromDocx } from '../utils/docxReader';
 
 interface DatabasePuskesmasViewProps {
   onSelectForGenerator?: (item: PuskesmasDatabaseItem) => void;
@@ -37,10 +47,13 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
   // Edit / Add Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<PuskesmasDatabaseItem | null>(null);
+  const [modalTab, setModalTab] = useState<'form' | 'ai_extract'>('form');
 
   // Form State for Modal
   const [formTitle, setFormTitle] = useState('');
-  const [formCategory, setFormCategory] = useState<DatabaseCategory>('capaian_program');
+  const [formCategory, setFormCategory] = useState<string>('capaian_program');
+  const [isCustomCategoryMode, setIsCustomCategoryMode] = useState(false);
+  const [customCategoryInput, setCustomCategoryInput] = useState('');
   const [formPeriod, setFormPeriod] = useState('Tahun 2026');
   const [formKlaster, setFormKlaster] = useState<IlpKlaster>('KLASTER_1');
   const [formSummary, setFormSummary] = useState('');
@@ -48,6 +61,19 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
   const [formMetrics, setFormMetrics] = useState<DatabaseMetric[]>([
     { key: '', value: '', target: '', unit: '%', status: 'tercapai' },
   ]);
+
+  // AI Extraction & AI Edit Prompt State
+  const [aiDocText, setAiDocText] = useState('');
+  const [aiExtractPrompt, setAiExtractPrompt] = useState('');
+  const [isAnalyzingAI, setIsAnalyzingAI] = useState(false);
+  const [aiEditPrompt, setAiEditPrompt] = useState('');
+  const [isEditingAI, setIsEditingAI] = useState(false);
+  const [uploadedDocName, setUploadedDocName] = useState<string | null>(null);
+
+  // Media picker modal for choosing a document
+  const [isMediaPickerOpen, setIsMediaPickerOpen] = useState(false);
+  const [mediaList, setMediaList] = useState<MediaItem[]>(getStoredMedia());
+  const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const triggerNotice = (msg: string) => {
     setNotice(msg);
@@ -97,10 +123,12 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
   }, [databaseList]);
 
   // Open Modal for Create
-  const handleOpenCreateModal = () => {
+  const handleOpenCreateModal = (preferAi: boolean = false) => {
     setEditingItem(null);
     setFormTitle('');
     setFormCategory('capaian_program');
+    setIsCustomCategoryMode(false);
+    setCustomCategoryInput('');
     setFormPeriod('Tahun 2026');
     setFormKlaster('KLASTER_1');
     setFormSummary('');
@@ -109,6 +137,11 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
       { key: 'Indikator Utama 1', value: '85%', target: '100%', unit: '%', status: 'tercapai' },
       { key: 'Indikator Utama 2', value: '70%', target: '100%', unit: '%', status: 'belum_tercapai' },
     ]);
+    setAiDocText('');
+    setAiExtractPrompt('');
+    setAiEditPrompt('');
+    setUploadedDocName(null);
+    setModalTab(preferAi ? 'ai_extract' : 'form');
     setIsModalOpen(true);
   };
 
@@ -116,12 +149,24 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
   const handleOpenEditModal = (item: PuskesmasDatabaseItem) => {
     setEditingItem(item);
     setFormTitle(item.title);
-    setFormCategory(item.category);
+    const isStandard = Object.keys(categoryLabels).includes(item.category);
+    if (isStandard) {
+      setFormCategory(item.category);
+      setIsCustomCategoryMode(false);
+      setCustomCategoryInput('');
+    } else {
+      setFormCategory('kustom');
+      setIsCustomCategoryMode(true);
+      setCustomCategoryInput(item.category);
+    }
     setFormPeriod(item.period || 'Tahun 2026');
     setFormKlaster(item.klaster || 'KLASTER_1');
     setFormSummary(item.summary);
     setFormNotes(item.notes || '');
     setFormMetrics(item.metrics.length > 0 ? [...item.metrics] : [{ key: '', value: '', status: 'tercapai' }]);
+    setAiEditPrompt('');
+    setUploadedDocName(null);
+    setModalTab('form');
     setIsModalOpen(true);
   };
 
@@ -142,6 +187,158 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
     setFormMetrics((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  // Upload Document File (.docx, .txt, .csv, dll)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadedDocName(file.name);
+    try {
+      if (file.name.endsWith('.docx')) {
+        triggerNotice(`Mengekstrak teks dari Word: ${file.name}...`);
+        const extracted = await extractTextFromDocx(file);
+        setAiDocText(extracted);
+      } else {
+        const text = await file.text();
+        setAiDocText(text);
+      }
+      triggerNotice(`Berkas "${file.name}" siap dianalisis oleh AI.`);
+    } catch (err: any) {
+      triggerNotice(`Gagal membaca berkas: ${err.message}`);
+    }
+  };
+
+  // Pick Document from Media Library
+  const handleSelectMediaDocument = async (mediaItem: MediaItem) => {
+    setIsMediaPickerOpen(false);
+    setUploadedDocName(mediaItem.name);
+
+    try {
+      if (mediaItem.name.endsWith('.docx') || mediaItem.mimeType?.includes('word')) {
+        triggerNotice(`Mengunduh dan mengekstrak "${mediaItem.name}" dari Pustaka Media...`);
+        const res = await fetch(mediaItem.dataUrl);
+        const blob = await res.blob();
+        const file = new File([blob], mediaItem.name, { type: mediaItem.mimeType });
+        const extracted = await extractTextFromDocx(file);
+        setAiDocText(extracted);
+      } else if (mediaItem.dataUrl.startsWith('data:text')) {
+        const base64Part = mediaItem.dataUrl.split(',')[1];
+        const text = atob(base64Part);
+        setAiDocText(text);
+      } else {
+        const res = await fetch(mediaItem.dataUrl);
+        const text = await res.text();
+        setAiDocText(text);
+      }
+      triggerNotice(`Dokumen "${mediaItem.name}" berhasil dimuat dari Pustaka Media!`);
+    } catch (err: any) {
+      triggerNotice(`Gagal membaca media: ${err.message}`);
+    }
+  };
+
+  // Call Server AI to Analyze Document and Convert to Database Format
+  const handleExecuteAiAnalysis = async () => {
+    if (!aiDocText.trim()) {
+      triggerNotice('Harap unggah berkas, pilih dari pustaka media, atau tempel teks dokumen terlebih dahulu!');
+      return;
+    }
+
+    setIsAnalyzingAI(true);
+    const agentConfig = getStoredAgentConfig();
+
+    try {
+      const res = await fetch('/api/ai-analyze-database-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documentText: aiDocText,
+          customPrompt: aiExtractPrompt.trim() || undefined,
+          customAgentConfig: agentConfig.enabled ? agentConfig : undefined,
+        }),
+      });
+
+      const json = await res.json();
+      if (json.success && json.data) {
+        const d = json.data;
+        if (d.title) setFormTitle(d.title);
+        if (d.category) setFormCategory(d.category);
+        if (d.period) setFormPeriod(d.period);
+        if (d.klaster) setFormKlaster(d.klaster);
+        if (d.summary) setFormSummary(d.summary);
+        if (d.notes) setFormNotes(d.notes);
+        if (Array.isArray(d.metrics) && d.metrics.length > 0) {
+          setFormMetrics(d.metrics);
+        }
+
+        setModalTab('form'); // Switch to preview & edit!
+        triggerNotice('Dokumen berhasil dianalisis & diubah menjadi format Database Puskesmas oleh AI!');
+      } else {
+        triggerNotice(`Gagal analisis AI: ${json.error || 'Respon tidak valid'}`);
+      }
+    } catch (err: any) {
+      triggerNotice(`Gagal menghubungi server AI: ${err.message}`);
+    } finally {
+      setIsAnalyzingAI(false);
+    }
+  };
+
+  // AI Refinement / Edit with Custom Prompt
+  const handleExecuteAiEdit = async () => {
+    if (!aiEditPrompt.trim()) {
+      triggerNotice('Tuliskan prompt instruksi perbaikan AI terlebih dahulu!');
+      return;
+    }
+
+    setIsEditingAI(true);
+    const agentConfig = getStoredAgentConfig();
+
+    try {
+      const currentDataSnapshot = {
+        title: formTitle,
+        category: formCategory,
+        period: formPeriod,
+        klaster: formKlaster,
+        summary: formSummary,
+        metrics: formMetrics,
+        notes: formNotes,
+      };
+
+      const res = await fetch('/api/ai-analyze-database-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documentText: aiDocText || undefined,
+          customPrompt: `Perbaiki data berikut sesuai perintah ini: "${aiEditPrompt.trim()}". Perhatikan akurasi nama metrik, angka, status, dan rekomendasi.`,
+          currentData: currentDataSnapshot,
+          customAgentConfig: agentConfig.enabled ? agentConfig : undefined,
+        }),
+      });
+
+      const json = await res.json();
+      if (json.success && json.data) {
+        const d = json.data;
+        if (d.title) setFormTitle(d.title);
+        if (d.category) setFormCategory(d.category);
+        if (d.period) setFormPeriod(d.period);
+        if (d.klaster) setFormKlaster(d.klaster);
+        if (d.summary) setFormSummary(d.summary);
+        if (d.notes) setFormNotes(d.notes);
+        if (Array.isArray(d.metrics) && d.metrics.length > 0) {
+          setFormMetrics(d.metrics);
+        }
+
+        setAiEditPrompt('');
+        triggerNotice('Data berhasil diperbaiki oleh AI sesuai instruksi prompt Anda!');
+      } else {
+        triggerNotice(`Gagal perbaikan AI: ${json.error || 'Respon tidak valid'}`);
+      }
+    } catch (err: any) {
+      triggerNotice(`Gagal menghubungi server AI: ${err.message}`);
+    } finally {
+      setIsEditingAI(false);
+    }
+  };
+
   // Save Modal
   const handleSaveForm = (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,11 +349,15 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
 
     const cleanedMetrics = formMetrics.filter((m) => m.key.trim().length > 0);
 
+    const effectiveCategory = (isCustomCategoryMode && customCategoryInput.trim()) 
+      ? customCategoryInput.trim() 
+      : formCategory;
+
     const now = new Date().toISOString();
     const itemToSave: PuskesmasDatabaseItem = {
       id: editingItem ? editingItem.id : 'db_' + Date.now(),
       title: formTitle.trim(),
-      category: formCategory,
+      category: effectiveCategory as DatabaseCategory,
       period: formPeriod.trim(),
       klaster: formKlaster,
       summary: formSummary.trim() || 'Data capaian operasional Puskesmas.',
@@ -184,10 +385,10 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
 
   // Reset to default
   const handleResetDefault = () => {
-    if (window.confirm('Reset database ke data capaian standar Puskesmas ILP bawaan? Data kustom akan ditimpa.')) {
+    if (window.confirm('Reset database ke data capaian standar Puskesmas ILP bawaan (1 contoh standar)? Data kustom akan ditimpa.')) {
       const def = resetDatabaseToDefault();
       setDatabaseList(def);
-      triggerNotice('Database Puskesmas berhasil direset ke standar ILP!');
+      triggerNotice('Database Puskesmas berhasil direset ke standar ILP (1 data contoh)!');
     }
   };
 
@@ -211,7 +412,7 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
   };
 
   // Helper Category Labels
-  const categoryLabels: Record<DatabaseCategory, { label: string; color: string }> = {
+  const categoryLabels: Record<string, { label: string; color: string }> = {
     spm: { label: 'Standar Pelayanan Minimal (SPM)', color: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
     indikator_mutu: { label: 'Indikator Nasional Mutu (INM)', color: 'bg-indigo-100 text-indigo-800 border-indigo-200' },
     capaian_program: { label: 'Capaian Program Layanan', color: 'bg-blue-100 text-blue-800 border-blue-200' },
@@ -222,6 +423,25 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
     kinerja_keuangan: { label: 'Kinerja BOK & Keuangan', color: 'bg-teal-100 text-teal-800 border-teal-200' },
     kustom: { label: 'Data Kustom', color: 'bg-slate-100 text-slate-800 border-slate-200' },
   };
+
+  const getCategoryBadge = (catKey: string) => {
+    if (categoryLabels[catKey]) {
+      return categoryLabels[catKey];
+    }
+    return {
+      label: catKey.replace(/_/g, ' '),
+      color: 'bg-teal-100 text-teal-800 border-teal-200',
+    };
+  };
+
+  const allCategoryKeys = useMemo(() => {
+    const defaultKeys = Object.keys(categoryLabels);
+    const existing = new Set<string>(defaultKeys);
+    databaseList.forEach((d) => {
+      if (d.category) existing.add(d.category);
+    });
+    return Array.from(existing);
+  }, [databaseList]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
@@ -235,6 +455,8 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
 
       {/* Hero Header */}
       <div className="bg-gradient-to-r from-teal-900 via-indigo-900 to-purple-950 text-white rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
+        <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-radial from-teal-500/10 to-transparent pointer-events-none" />
+        
         <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30 text-xs font-semibold">
@@ -250,12 +472,23 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            {/* Tombol Tambah Data Manual */}
             <button
-              onClick={handleOpenCreateModal}
+              onClick={() => handleOpenCreateModal(false)}
               className="flex items-center gap-2 px-4 py-2.5 text-xs font-bold text-slate-900 bg-teal-400 hover:bg-teal-300 rounded-xl shadow-lg transition-all active:scale-95 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              <span>Tambah Data Puskesmas</span>
+              <span>Tambah Data Manual</span>
+            </button>
+
+            {/* Tombol Tambah Data via AI Ekstraksi Dokumen */}
+            <button
+              onClick={() => handleOpenCreateModal(true)}
+              className="flex items-center gap-2 px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 rounded-xl shadow-lg transition-all active:scale-95 cursor-pointer ring-2 ring-indigo-400/30"
+              title="Upload berkas Word atau ambil dari media untuk diekstrak otomatis menjadi data Puskesmas"
+            >
+              <Sparkles className="w-4 h-4 text-amber-300" />
+              <span>Ekstrak Dokumen via AI</span>
             </button>
 
             <button
@@ -363,14 +596,15 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
             Semua ({databaseList.length})
           </button>
 
-          {Object.entries(categoryLabels).map(([catKey, catInfo]) => {
+          {allCategoryKeys.map((catKey) => {
+            const catInfo = getCategoryBadge(catKey);
             const count = databaseList.filter((d) => d.category === catKey).length;
             if (count === 0 && selectedCategory !== catKey) return null;
             return (
               <button
                 key={catKey}
                 onClick={() => setSelectedCategory(catKey)}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg shrink-0 transition-all flex items-center gap-1.5 ${
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg shrink-0 transition-all flex items-center gap-1.5 cursor-pointer ${
                   selectedCategory === catKey
                     ? 'bg-teal-700 text-white shadow-xs'
                     : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -387,7 +621,7 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
       {/* Main Content: Database Cards Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {filteredList.map((item) => {
-          const cat = categoryLabels[item.category] || categoryLabels.kustom;
+          const cat = getCategoryBadge(item.category);
           const klasterObj = ILP_KLASTERS.find((k) => k.id === item.klaster);
 
           return (
@@ -546,21 +780,30 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
                 Coba ubah kata kunci pencarian atau buat data baru seperti capaian program, SPM, atau profil ketenagaan.
               </p>
             </div>
-            <button
-              onClick={handleOpenCreateModal}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 rounded-xl shadow-sm"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Tambah Data Sekarang</span>
-            </button>
+            <div className="flex items-center justify-center gap-2">
+              <button
+                onClick={() => handleOpenCreateModal(false)}
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 rounded-xl shadow-sm"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Tambah Data Manual</span>
+              </button>
+              <button
+                onClick={() => handleOpenCreateModal(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 rounded-xl shadow-sm"
+              >
+                <Sparkles className="w-4 h-4 text-amber-300" />
+                <span>Ekstrak Dokumen via AI</span>
+              </button>
+            </div>
           </div>
         )}
       </div>
 
-      {/* MODAL: ADD / EDIT PUSKESMAS DATA */}
+      {/* MODAL: ADD / EDIT PUSKESMAS DATA WITH AI EXTRACTION & AI EDIT */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-3xl w-full border border-slate-200 shadow-2xl overflow-hidden my-4 flex flex-col max-h-[92vh] animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-4xl w-full border border-slate-200 shadow-2xl overflow-hidden my-4 flex flex-col max-h-[92vh] animate-in fade-in duration-200">
             {/* Header */}
             <div className="px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-teal-50 via-white to-indigo-50 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2.5">
@@ -572,208 +815,530 @@ export const DatabasePuskesmasView: React.FC<DatabasePuskesmasViewProps> = ({
                     {editingItem ? 'Edit Data Puskesmas' : 'Tambah Data / Capaian Baru'}
                   </h3>
                   <p className="text-[11px] text-slate-500">
-                    Data ini akan menjadi bahan acuan AI saat menyusun SOP, SK, KAK, dan pedoman
+                    Data ini menjadi bahan rujukan AI untuk penyusunan SOP, SK, KAK, dan pedoman
                   </p>
                 </div>
               </div>
+
+              {/* Mode Tabs */}
+              <div className="flex items-center gap-2">
+                <div className="bg-slate-100 p-1 rounded-xl flex items-center gap-1 border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setModalTab('form')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                      modalTab === 'form'
+                        ? 'bg-white text-teal-800 shadow-xs border border-slate-200 font-bold'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>Form & Preview</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setModalTab('ai_extract')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                      modalTab === 'ai_extract'
+                        ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-xs font-bold'
+                        : 'text-purple-700 hover:bg-purple-50'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Ekstraksi AI dari Berkas</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* TAB 1: AI EXTRACTION FROM DOCUMENT */}
+            {modalTab === 'ai_extract' && (
+              <div className="p-6 overflow-y-auto space-y-5 flex-1 bg-slate-50/50">
+                <div className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-2xl p-4 space-y-2">
+                  <div className="flex items-center gap-2 text-indigo-950 font-bold text-xs">
+                    <Sparkles className="w-4 h-4 text-purple-600" />
+                    <span>Fitur AI: Ekstraksi Otomatis Dokumen ke Format Database</span>
+                  </div>
+                  <p className="text-xs text-indigo-800/80 leading-relaxed">
+                    Unggah berkas laporan (Word .docx, teks, csv) atau ambil dari Pustaka Media. AI Gemini akan membaca isi dokumen, mendeteksi judul, kategori SPM/Mutu, periode, angka capaian/indikator, status tercapai, serta catatan rekomendasi faskes secara otomatis.
+                  </p>
+                </div>
+
+                {/* File Upload / Media Picker Buttons */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <input
+                    type="file"
+                    ref={fileUploadInputRef}
+                    accept=".docx,.txt,.csv,.json"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileUploadInputRef.current?.click()}
+                    className="p-4 bg-white hover:bg-indigo-50/50 border-2 border-dashed border-indigo-200 hover:border-indigo-400 rounded-2xl text-left transition-all flex items-center gap-3 cursor-pointer group"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 block">
+                        Upload Berkas dari Komputer
+                      </span>
+                      <span className="text-[11px] text-slate-500 block">
+                        Mendukung Word (.docx), teks (.txt), CSV
+                      </span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMediaList(getStoredMedia());
+                      setIsMediaPickerOpen(true);
+                    }}
+                    className="p-4 bg-white hover:bg-purple-50/50 border-2 border-dashed border-purple-200 hover:border-purple-400 rounded-2xl text-left transition-all flex items-center gap-3 cursor-pointer group"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                      <Folder className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 block">
+                        Pilih dari Pustaka Media
+                      </span>
+                      <span className="text-[11px] text-slate-500 block">
+                        Ambil dokumen yang sudah tersimpan di Puskesmas
+                      </span>
+                    </div>
+                  </button>
+                </div>
+
+                {uploadedDocName && (
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs flex items-center justify-between">
+                    <span className="flex items-center gap-2 font-medium">
+                      <FileCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Berkas Aktif: <strong>{uploadedDocName}</strong></span>
+                    </span>
+                    <span className="text-[11px] text-emerald-700 font-mono">
+                      {aiDocText.length} karakter termuat
+                    </span>
+                  </div>
+                )}
+
+                {/* Textarea for document text */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700">
+                      Isi Teks / Tabel Dokumen yang Akan Dianalisis AI
+                    </label>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Bisa langsung diedit atau ditempel
+                    </span>
+                  </div>
+                  <textarea
+                    rows={7}
+                    value={aiDocText}
+                    onChange={(e) => setAiDocText(e.target.value)}
+                    placeholder="Teks dokumen laporan atau tabel capaian Puskesmas akan muncul di sini setelah upload berkas, atau Anda dapat langsung menempelkan teks dari dokumen lain..."
+                    className="w-full p-3 text-xs font-mono border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-purple-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Custom AI prompt */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Wand2 className="w-3.5 h-3.5 text-purple-600" />
+                    <span>Instruksi / Prompt Khusus untuk AI (Opsional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={aiExtractPrompt}
+                    onChange={(e) => setAiExtractPrompt(e.target.value)}
+                    placeholder="Contoh: 'Fokuskan ekstraksi pada 12 indikator SPM dan sebutkan target 100%' atau 'Kelompokkan berdasarkan klaster ILP'..."
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:outline-none bg-white"
+                  />
+                </div>
+
+                {/* Action button */}
+                <div className="pt-2 flex items-center justify-between border-t border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setModalTab('form')}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-xl"
+                  >
+                    Batal / Beralih ke Form Manual
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleExecuteAiAnalysis}
+                    disabled={isAnalyzingAI || !aiDocText.trim()}
+                    className="flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 rounded-xl shadow-lg transition-all active:scale-95 cursor-pointer"
+                  >
+                    {isAnalyzingAI ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Menganalisis Dokumen via Gemini AI...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4 text-amber-300" />
+                        <span>🚀 Ekstrak ke Format Database via AI</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: FORM & LIVE PREVIEW DATA (WITH AI PROMPT EDIT) */}
+            {modalTab === 'form' && (
+              <form onSubmit={handleSaveForm} className="p-6 overflow-y-auto space-y-5 flex-1">
+                {/* AI Refinement Prompt Bar */}
+                <div className="bg-gradient-to-r from-purple-50 via-fuchsia-50 to-indigo-50 border border-purple-200 rounded-2xl p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-purple-900 flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-purple-600" />
+                      <span>Edit & Sempurnakan Data dengan Prompt AI</span>
+                    </span>
+                    <span className="text-[10px] text-purple-700 font-medium">
+                      Gemini 3.8 Flash
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={aiEditPrompt}
+                      onChange={(e) => setAiEditPrompt(e.target.value)}
+                      placeholder="Masukkan perintah edit: misal 'Tambahkan target 100% untuk semua indikator', 'Hitung persentase', 'Perbaiki catatan RTL'..."
+                      className="flex-1 px-3 py-2 text-xs border border-purple-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-purple-500/20"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleExecuteAiEdit}
+                      disabled={isEditingAI || !aiEditPrompt.trim()}
+                      className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-xl shadow-sm transition-all active:scale-95 shrink-0 cursor-pointer"
+                    >
+                      {isEditingAI ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Memproses...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Wand2 className="w-3.5 h-3.5" />
+                          <span>Perbaiki via AI</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Title */}
+                  <div className="sm:col-span-2 space-y-1">
+                    <label className="text-xs font-bold text-slate-700">
+                      Judul Laporan / Kumpulan Data <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={formTitle}
+                      onChange={(e) => setFormTitle(e.target.value)}
+                      placeholder="Contoh: Capaian 12 Indikator SPM Kesehatan Tahun 2025"
+                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Category */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-slate-700">Kategori Data</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomCategoryMode(!isCustomCategoryMode);
+                          if (!isCustomCategoryMode && !customCategoryInput) {
+                            setCustomCategoryInput('');
+                          }
+                        }}
+                        className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 underline cursor-pointer"
+                      >
+                        {isCustomCategoryMode ? 'Pilih Kategori Standar' : '+ Buat Kategori Manual'}
+                      </button>
+                    </div>
+
+                    {isCustomCategoryMode ? (
+                      <div className="space-y-1">
+                        <input
+                          type="text"
+                          required
+                          value={customCategoryInput}
+                          onChange={(e) => setCustomCategoryInput(e.target.value)}
+                          placeholder="Ketik nama kategori manual... (cth: SPM Desa, Penilaian Kinerja, dll)"
+                          className="w-full px-3 py-2 text-xs border border-teal-400 bg-teal-50/50 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none font-semibold text-teal-950"
+                        />
+                        <span className="text-[10px] text-teal-700 block">Kategori manual ini akan otomatis terdaftar dan bisa difilter.</span>
+                      </div>
+                    ) : (
+                      <select
+                        value={formCategory}
+                        onChange={(e) => {
+                          if (e.target.value === '__NEW_CUSTOM__') {
+                            setIsCustomCategoryMode(true);
+                            setCustomCategoryInput('');
+                          } else {
+                            setFormCategory(e.target.value);
+                          }
+                        }}
+                        className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none bg-white font-medium cursor-pointer"
+                      >
+                        <option value="spm">Standar Pelayanan Minimal (SPM)</option>
+                        <option value="indikator_mutu">Indikator Nasional Mutu (INM)</option>
+                        <option value="capaian_program">Capaian Program Layanan</option>
+                        <option value="demografi_sasaran">Demografi & Sasaran Wilayah</option>
+                        <option value="sdmk_ketenagaan">SDMK & Ketenagaan</option>
+                        <option value="sarpras_alkes">Sarpras & Alkes (ASPAK)</option>
+                        <option value="surveilans_penyakit">Surveilans & KLB</option>
+                        <option value="kinerja_keuangan">Kinerja BOK & Keuangan</option>
+                        <option value="kustom">Data Kustom</option>
+                        <option value="__NEW_CUSTOM__">+ Buat Kategori Manual Baru...</option>
+                      </select>
+                    )}
+                  </div>
+
+                  {/* Period */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-700">Periode / Waktu Data</label>
+                    <input
+                      type="text"
+                      value={formPeriod}
+                      onChange={(e) => setFormPeriod(e.target.value)}
+                      placeholder="Contoh: Tahun 2025, Semester II 2025, Triwulan I 2026"
+                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Klaster */}
+                  <div className="sm:col-span-2 space-y-1">
+                    <label className="text-xs font-bold text-slate-700">Klaster ILP Terkait (Opsional)</label>
+                    <select
+                      value={formKlaster}
+                      onChange={(e) => setFormKlaster(e.target.value as IlpKlaster)}
+                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none bg-white font-medium"
+                    >
+                      {ILP_KLASTERS.map((k) => (
+                        <option key={k.id} value={k.id}>
+                          {k.name} ({k.description.slice(0, 45)}...)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Summary */}
+                  <div className="sm:col-span-2 space-y-1">
+                    <label className="text-xs font-bold text-slate-700">Ringkasan Gambaran Umum</label>
+                    <textarea
+                      rows={2}
+                      value={formSummary}
+                      onChange={(e) => setFormSummary(e.target.value)}
+                      placeholder="Ringkasan konteks data ini untuk dipahami oleh AI..."
+                      className="w-full p-2.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Dynamic Metrics List */}
+                <div className="space-y-3 pt-3 border-t border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-900">
+                        Rincian Indikator / Angka Capaian ({formMetrics.length})
+                      </h4>
+                      <p className="text-[11px] text-slate-500">
+                        Sesuaikan nama indikator, nilai realisasi, target, dan statusnya
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleAddMetricRow}
+                      className="flex items-center gap-1 px-3 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Tambah Baris</span>
+                    </button>
+                  </div>
+
+                  <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                    {formMetrics.map((metric, idx) => (
+                      <div
+                        key={idx}
+                        className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 sm:space-y-0 sm:flex sm:items-center sm:gap-2"
+                      >
+                        {/* Metric Name */}
+                        <input
+                          type="text"
+                          placeholder="Nama Indikator / Data"
+                          value={metric.key}
+                          onChange={(e) => handleUpdateMetricRow(idx, 'key', e.target.value)}
+                          className="flex-1 px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                        />
+
+                        {/* Value */}
+                        <input
+                          type="text"
+                          placeholder="Nilai (e.g. 89%)"
+                          value={metric.value}
+                          onChange={(e) => handleUpdateMetricRow(idx, 'value', e.target.value)}
+                          className="w-24 px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-mono"
+                        />
+
+                        {/* Target */}
+                        <input
+                          type="text"
+                          placeholder="Target (100%)"
+                          value={metric.target || ''}
+                          onChange={(e) => handleUpdateMetricRow(idx, 'target', e.target.value)}
+                          className="w-24 px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-mono"
+                        />
+
+                        {/* Status */}
+                        <select
+                          value={metric.status || 'tercapai'}
+                          onChange={(e) => handleUpdateMetricRow(idx, 'status', e.target.value)}
+                          className="w-36 px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-semibold"
+                        >
+                          <option value="tercapai">✓ Tercapai</option>
+                          <option value="belum_tercapai">✗ Belum Tercapai</option>
+                          <option value="dalam_pantauan">⏳ Dalam Pantauan</option>
+                        </select>
+
+                        {/* Delete row */}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveMetricRow(idx)}
+                          disabled={formMetrics.length <= 1}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 disabled:opacity-30 rounded hover:bg-rose-50 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Notes / Rekomendasi */}
+                <div className="space-y-1 pt-2 border-t border-slate-200">
+                  <label className="text-xs font-bold text-slate-700">
+                    Catatan Analisis & Rencana Tindak Lanjut (RTL)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={formNotes}
+                    onChange={(e) => setFormNotes(e.target.value)}
+                    placeholder="Catatan masalah, kendala di lapangan, atau rekomendasi perbaikan untuk disitir oleh AI..."
+                    className="w-full p-2.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Modal Footer */}
+                <div className="pt-4 border-t border-slate-200 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setIsModalOpen(false)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 text-xs font-bold text-white bg-gradient-to-r from-teal-600 to-indigo-600 hover:from-teal-700 hover:to-indigo-700 rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
+                  >
+                    {editingItem ? 'Simpan Perubahan' : 'Simpan ke Database Puskesmas'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: PILIH DOKUMEN DARI PUSTAKA MEDIA */}
+      {isMediaPickerOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Folder className="w-5 h-5 text-purple-600" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Pilih Dokumen dari Pustaka Media
+                </h3>
+              </div>
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl"
+                onClick={() => setIsMediaPickerOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Form Body */}
-            <form onSubmit={handleSaveForm} className="p-6 overflow-y-auto space-y-5 flex-1">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Title */}
-                <div className="sm:col-span-2 space-y-1">
-                  <label className="text-xs font-bold text-slate-700">
-                    Judul Laporan / Kumpulan Data <span className="text-rose-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formTitle}
-                    onChange={(e) => setFormTitle(e.target.value)}
-                    placeholder="Contoh: Capaian 12 Indikator SPM Kesehatan Tahun 2025"
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
-                  />
-                </div>
+            <div className="p-6 overflow-y-auto flex-1 space-y-4">
+              <p className="text-xs text-slate-500">
+                Pilih berkas dokumen laporan akreditasi (.docx, surat, notulen) yang tersimpan di Pustaka Media untuk diekstrak menjadi database:
+              </p>
 
-                {/* Category */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-700">Kategori Data</label>
-                  <select
-                    value={formCategory}
-                    onChange={(e) => setFormCategory(e.target.value as DatabaseCategory)}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none bg-white"
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {mediaList.filter(m => m.type === 'document' || m.name.endsWith('.docx') || m.name.endsWith('.txt')).map((media) => (
+                  <div
+                    key={media.id}
+                    onClick={() => handleSelectMediaDocument(media)}
+                    className="p-3 bg-slate-50 hover:bg-purple-50/80 border border-slate-200 hover:border-purple-300 rounded-2xl cursor-pointer transition-all flex items-start gap-3 group shadow-2xs"
                   >
-                    <option value="spm">Standar Pelayanan Minimal (SPM)</option>
-                    <option value="indikator_mutu">Indikator Nasional Mutu (INM)</option>
-                    <option value="capaian_program">Capaian Program Layanan</option>
-                    <option value="demografi_sasaran">Demografi & Sasaran Wilayah</option>
-                    <option value="sdmk_ketenagaan">SDMK & Ketenagaan</option>
-                    <option value="sarpras_alkes">Sarpras & Alkes (ASPAK)</option>
-                    <option value="surveilans_penyakit">Surveilans & KLB</option>
-                    <option value="kinerja_keuangan">Kinerja BOK & Keuangan</option>
-                    <option value="kustom">Data Kustom</option>
-                  </select>
-                </div>
-
-                {/* Period */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-700">Periode / Waktu Data</label>
-                  <input
-                    type="text"
-                    value={formPeriod}
-                    onChange={(e) => setFormPeriod(e.target.value)}
-                    placeholder="Contoh: Tahun 2025, Semester II 2025, Triwulan I 2026"
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
-                  />
-                </div>
-
-                {/* Klaster */}
-                <div className="sm:col-span-2 space-y-1">
-                  <label className="text-xs font-bold text-slate-700">Klaster ILP Terkait (Opsional)</label>
-                  <select
-                    value={formKlaster}
-                    onChange={(e) => setFormKlaster(e.target.value as IlpKlaster)}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none bg-white"
-                  >
-                    {ILP_KLASTERS.map((k) => (
-                      <option key={k.id} value={k.id}>
-                        {k.name} ({k.description.slice(0, 45)}...)
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Summary */}
-                <div className="sm:col-span-2 space-y-1">
-                  <label className="text-xs font-bold text-slate-700">Ringkasan Gambaran Umum</label>
-                  <textarea
-                    rows={2}
-                    value={formSummary}
-                    onChange={(e) => setFormSummary(e.target.value)}
-                    placeholder="Ringkasan konteks data ini untuk dipahami oleh AI..."
-                    className="w-full p-2.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {/* Dynamic Metrics List */}
-              <div className="space-y-3 pt-3 border-t border-slate-200">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-900">
-                      Rincian Indikator / Angka Capaian ({formMetrics.length})
-                    </h4>
-                    <p className="text-[11px] text-slate-500">
-                      Masukkan nama indikator, nilai realisasi, target, dan statusnya
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleAddMetricRow}
-                    className="flex items-center gap-1 px-3 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Tambah Baris</span>
-                  </button>
-                </div>
-
-                <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
-                  {formMetrics.map((metric, idx) => (
-                    <div
-                      key={idx}
-                      className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 sm:space-y-0 sm:flex sm:items-center sm:gap-2"
-                    >
-                      {/* Metric Name */}
-                      <input
-                        type="text"
-                        placeholder="Nama Indikator / Data"
-                        value={metric.key}
-                        onChange={(e) => handleUpdateMetricRow(idx, 'key', e.target.value)}
-                        className="flex-1 px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
-                      />
-
-                      {/* Value */}
-                      <input
-                        type="text"
-                        placeholder="Nilai (e.g. 89%)"
-                        value={metric.value}
-                        onChange={(e) => handleUpdateMetricRow(idx, 'value', e.target.value)}
-                        className="w-24 px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-mono"
-                      />
-
-                      {/* Target */}
-                      <input
-                        type="text"
-                        placeholder="Target (100%)"
-                        value={metric.target || ''}
-                        onChange={(e) => handleUpdateMetricRow(idx, 'target', e.target.value)}
-                        className="w-24 px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-mono"
-                      />
-
-                      {/* Status */}
-                      <select
-                        value={metric.status || 'tercapai'}
-                        onChange={(e) => handleUpdateMetricRow(idx, 'status', e.target.value)}
-                        className="w-32 px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-semibold"
-                      >
-                        <option value="tercapai">✓ Tercapai</option>
-                        <option value="belum_tercapai">✗ Belum Tercapai</option>
-                        <option value="dalam_pantauan">⏳ Dalam Pantauan</option>
-                      </select>
-
-                      {/* Delete row */}
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveMetricRow(idx)}
-                        disabled={formMetrics.length <= 1}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 disabled:opacity-30 rounded hover:bg-rose-50"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                    <div className="w-9 h-9 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
+                      <FileText className="w-5 h-5" />
                     </div>
-                  ))}
+                    <div className="min-w-0 flex-1">
+                      <span className="text-xs font-bold text-slate-800 truncate block group-hover:text-purple-700">
+                        {media.name}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono block">
+                        {Math.round(media.size / 1024)} KB · {media.category || 'Dokumen'}
+                      </span>
+                      <span className="inline-block mt-1 text-[10px] font-bold text-purple-600 group-hover:underline">
+                        Pilih & Analisis via AI →
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {mediaList.filter(m => m.type === 'document' || m.name.endsWith('.docx') || m.name.endsWith('.txt')).length === 0 && (
+                <div className="p-8 text-center border-2 border-dashed border-slate-200 rounded-2xl space-y-2">
+                  <p className="text-xs text-slate-500">Belum ada berkas dokumen di Pustaka Media.</p>
+                  <p className="text-[11px] text-slate-400">Silakan unggah dokumen Word (.docx) langsung dari komputer.</p>
                 </div>
-              </div>
+              )}
+            </div>
 
-              {/* Notes / Rekomendasi */}
-              <div className="space-y-1 pt-2 border-t border-slate-200">
-                <label className="text-xs font-bold text-slate-700">
-                  Catatan Analisis & Rencana Tindak Lanjut (RTL)
-                </label>
-                <textarea
-                  rows={2}
-                  value={formNotes}
-                  onChange={(e) => setFormNotes(e.target.value)}
-                  placeholder="Catatan masalah, kendala di lapangan, atau rekomendasi perbaikan untuk disitir oleh AI..."
-                  className="w-full p-2.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:outline-none"
-                />
-              </div>
-
-              {/* Modal Footer */}
-              <div className="pt-4 border-t border-slate-200 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 text-xs font-bold text-white bg-gradient-to-r from-teal-600 to-indigo-600 hover:from-teal-700 hover:to-indigo-700 rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
-                >
-                  {editingItem ? 'Simpan Perubahan' : 'Simpan ke Database'}
-                </button>
-              </div>
-            </form>
+            <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsMediaPickerOpen(false)}
+                className="px-4 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-xl transition-colors"
+              >
+                Tutup
+              </button>
+            </div>
           </div>
         </div>
       )}

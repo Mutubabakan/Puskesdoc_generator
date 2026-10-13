@@ -359,3 +359,161 @@ export async function exportToDocx(doc: PuskesDoc, profile: FaskesProfile): Prom
   link.click();
   document.body.removeChild(link);
 }
+
+// Generate Docx Blob & FileName directly
+export async function generateDocxBlob(doc: PuskesDoc, profile: FaskesProfile): Promise<{ blob: Blob; fileName: string }> {
+  const sections: any[] = [];
+
+  if (doc.useKop) {
+    sections.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 40 },
+        children: [
+          new TextRun({
+            text: profile.pemerintahDaerah.toUpperCase(),
+            font: 'Arial',
+            size: 24,
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 40 },
+        children: [
+          new TextRun({
+            text: profile.dinasKesehatan.toUpperCase(),
+            font: 'Arial',
+            size: 26,
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 60 },
+        children: [
+          new TextRun({
+            text: profile.namaPuskesmas.toUpperCase(),
+            font: 'Arial',
+            size: 30,
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 120 },
+        border: {
+          bottom: {
+            color: '000000',
+            space: 1,
+            style: BorderStyle.SINGLE,
+            size: 24,
+          },
+        },
+        children: [
+          new TextRun({
+            text: `${profile.alamatPuskesmas} | Telp: ${profile.teleponPuskesmas} | Email: ${profile.emailPuskesmas}`,
+            font: 'Arial',
+            size: 18,
+          }),
+        ],
+      })
+    );
+  }
+
+  // Document Title
+  sections.push(
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { before: 200, after: 100 },
+      children: [
+        new TextRun({
+          text: doc.title.toUpperCase(),
+          font: 'Arial',
+          size: 28,
+          bold: true,
+        }),
+      ],
+    }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 240 },
+      children: [
+        new TextRun({
+          text: `Nomor: ${doc.docNumber || '440/PKM/2026'}`,
+          font: 'Arial',
+          size: 20,
+        }),
+      ],
+    })
+  );
+
+  // Sections
+  (doc.sections || []).forEach((sec) => {
+    sections.push(
+      new Paragraph({
+        spacing: { before: 180, after: 80 },
+        children: [
+          new TextRun({
+            text: sec.title,
+            font: 'Arial',
+            size: 22,
+            bold: true,
+          }),
+        ],
+      }),
+      new Paragraph({
+        spacing: { after: 120 },
+        children: [
+          new TextRun({
+            text: sec.content,
+            font: 'Arial',
+            size: 20,
+          }),
+        ],
+      })
+    );
+  });
+
+  const wordDoc = new Document({
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: {
+              top: 1440,
+              right: 1440,
+              bottom: 1440,
+              left: 1440,
+            },
+          },
+        },
+        children: sections,
+      },
+    ],
+  });
+
+  const blob = await Packer.toBlob(wordDoc);
+  const fileName = `${doc.docType}_${doc.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40)}.docx`;
+  return { blob, fileName };
+}
+
+// Convert Docx Blob to Base64 Data URL for Pustaka Media storage
+export async function generateDocxBase64(doc: PuskesDoc, profile: FaskesProfile): Promise<{ dataUrl: string; fileName: string; size: number }> {
+  const { blob, fileName } = await generateDocxBlob(doc, profile);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      resolve({
+        dataUrl: reader.result as string,
+        fileName,
+        size: blob.size,
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}

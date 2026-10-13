@@ -88,6 +88,11 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
   // Notice State
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
+  const triggerNotice = (message: string, type: 'success' | 'error' = 'success') => {
+    setNotice({ type, message });
+    setTimeout(() => setNotice(null), 3500);
+  };
+
   // Drag state for reordering sections
   const [draggedSectionIdx, setDraggedSectionIdx] = useState<number | null>(null);
 
@@ -238,46 +243,103 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
     return filtered.length > 0 ? filtered : variables;
   }, [autocomplete.isOpen, autocomplete.query, variables]);
 
+  const [executingBracketIdx, setExecutingBracketIdx] = useState<number | null>(null);
+
+  const handleExecuteBracketPromptInTemplate = async (sectionIdx: number) => {
+    if (!editingTemplate) return;
+    const sec = editingTemplate.sections[sectionIdx];
+    if (!sec) return;
+    setExecutingBracketIdx(sectionIdx);
+
+    try {
+      const res = await fetch('/api/execute-bracket-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sectionTitle: sec.title,
+          sectionContent: sec.content,
+          docType: editingTemplate.docType,
+          docTitle: editingTemplate.name,
+          variables: variables.reduce((acc: any, v) => {
+            acc[v.key] = v.value;
+            return acc;
+          }, {}),
+        }),
+      });
+
+      const json = await res.json();
+      if (json.success && json.updatedContent) {
+        const updated = [...editingTemplate.sections];
+        updated[sectionIdx] = { ...sec, content: json.updatedContent };
+        setEditingTemplate({ ...editingTemplate, sections: updated });
+        triggerNotice(`Perintah AI [...] pada "${sec.title}" berhasil dieksekusi!`);
+      } else {
+        triggerNotice(`Gagal mengeksekusi AI: ${json.error || 'Respon tidak valid'}`);
+      }
+    } catch (err: any) {
+      triggerNotice(`Gagal: ${err.message}`);
+    } finally {
+      setExecutingBracketIdx(null);
+    }
+  };
+
   const handleInputCheckTrigger = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
     fieldId: string,
     sectionIdx?: number
   ) => {
+    // Ignore arrow navigation keys so selectedIndex doesn't reset when user presses ArrowDown/ArrowUp
+    if ('key' in e && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape')) {
+      return;
+    }
+
     const target = e.currentTarget;
     const value = target.value;
     const cursor = target.selectionStart || 0;
     const textBefore = value.slice(0, cursor);
+    const textAfter = value.slice(cursor);
 
-    let match = textBefore.match(/\{\{([a-zA-Z0-9_\s]*)$/);
     let query = '';
     let matchLen = 0;
+    let isMatch = false;
 
-    if (match) {
-      query = match[1].trim().toLowerCase();
-      matchLen = match[0].length;
+    // 1. Direct match: typing {{ or {{variable
+    const matchEndsWith = textBefore.match(/\{\{([a-zA-Z0-9_\s]*)$/);
+    if (matchEndsWith) {
+      query = matchEndsWith[1].trim().toLowerCase();
+      matchLen = matchEndsWith[0].length + (textAfter.startsWith('}}') ? 2 : 0);
+      isMatch = true;
+    } else if (textBefore.endsWith('{{}}')) {
+      query = '';
+      matchLen = 4;
+      isMatch = true;
     } else {
       const lastOpen = textBefore.lastIndexOf('{{');
-      if (lastOpen !== -1 && (cursor - lastOpen) <= 30) {
-        const between = textBefore.slice(lastOpen + 2);
-        if (!between.includes('}}')) {
-          query = between.trim().toLowerCase();
-          matchLen = between.length + 2;
-          match = ['{{' + between, between] as any;
+      if (lastOpen !== -1 && (cursor - lastOpen) <= 35) {
+        const slice = textBefore.slice(lastOpen + 2);
+        if (slice === '}}' || slice === '}') {
+          query = '';
+          matchLen = slice.length + 2;
+          isMatch = true;
+        } else if (!slice.includes('}}')) {
+          query = slice.trim().toLowerCase();
+          matchLen = slice.length + 2 + (textAfter.startsWith('}}') ? 2 : 0);
+          isMatch = true;
         }
       }
     }
 
-    if (match) {
+    if (isMatch) {
       const rect = target.getBoundingClientRect();
-      setAutocomplete({
+      setAutocomplete((prev) => ({
         isOpen: true,
         query,
         fieldId,
         sectionIdx,
         cursorIndex: Math.max(0, cursor - matchLen),
         position: { top: rect.bottom, left: Math.max(16, rect.left) },
-        selectedIndex: 0,
-      });
+        selectedIndex: prev.query === query && prev.isOpen ? prev.selectedIndex : 0,
+      }));
     } else {
       if (autocomplete.isOpen) {
         setAutocomplete((prev) => ({ ...prev, isOpen: false }));
@@ -296,19 +358,19 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
     if (fieldId === 'name') {
       const text = editingTemplate.name;
       const before = text.slice(0, cursorIndex);
-      const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*/, '').replace(/^\}\}/, '');
+      const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*(\}\})?/, '');
       setEditingTemplate({ ...editingTemplate, name: before + tag + after });
     } else if (fieldId === 'description') {
       const text = editingTemplate.description;
       const before = text.slice(0, cursorIndex);
-      const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*/, '').replace(/^\}\}/, '');
+      const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*(\}\})?/, '');
       setEditingTemplate({ ...editingTemplate, description: before + tag + after });
     } else if (fieldId.startsWith('sec_title_') && typeof sectionIdx === 'number') {
       const updated = [...editingTemplate.sections];
       if (updated[sectionIdx]) {
         const text = updated[sectionIdx].title;
         const before = text.slice(0, cursorIndex);
-        const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*/, '').replace(/^\}\}/, '');
+        const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*(\}\})?/, '');
         updated[sectionIdx] = { ...updated[sectionIdx], title: before + tag + after };
         setEditingTemplate({ ...editingTemplate, sections: updated });
       }
@@ -317,7 +379,7 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
       if (updated[sectionIdx]) {
         const text = updated[sectionIdx].content;
         const before = text.slice(0, cursorIndex);
-        const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*/, '').replace(/^\}\}/, '');
+        const after = text.slice(cursorIndex).replace(/^\{\{[a-zA-Z0-9_\s]*(\}\})?/, '');
         updated[sectionIdx] = { ...updated[sectionIdx], content: before + tag + after };
         setEditingTemplate({ ...editingTemplate, sections: updated });
       }
@@ -1463,13 +1525,19 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
               {/* Basic Template Meta Fields */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                    Nama Template
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span>Nama Template</span>
+                    <span className="text-[9px] text-purple-600 font-mono">Ketik {'{{'} untuk variabel</span>
                   </label>
                   <input
                     type="text"
                     value={editingTemplate.name}
-                    onChange={(e) => setEditingTemplate({ ...editingTemplate, name: e.target.value })}
+                    onChange={(e) => {
+                      setEditingTemplate({ ...editingTemplate, name: e.target.value });
+                      handleInputCheckTrigger(e, 'name');
+                    }}
+                    onKeyUp={(e) => handleInputCheckTrigger(e, 'name')}
+                    onKeyDown={handleInputKeyDown}
                     className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-1 focus:ring-purple-500 font-bold bg-white"
                   />
                 </div>
@@ -1493,13 +1561,19 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                    Deskripsi Ringkas
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span>Deskripsi Ringkas</span>
+                    <span className="text-[9px] text-purple-600 font-mono">Ketik {'{{'} untuk variabel</span>
                   </label>
                   <input
                     type="text"
                     value={editingTemplate.description}
-                    onChange={(e) => setEditingTemplate({ ...editingTemplate, description: e.target.value })}
+                    onChange={(e) => {
+                      setEditingTemplate({ ...editingTemplate, description: e.target.value });
+                      handleInputCheckTrigger(e, 'description');
+                    }}
+                    onKeyUp={(e) => handleInputCheckTrigger(e, 'description')}
+                    onKeyDown={handleInputKeyDown}
                     className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
                     placeholder="Keterangan fungsi template"
                   />
@@ -1805,6 +1879,29 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                         <ImageIcon className="w-3.5 h-3.5" />
                         <span>Baki Media</span>
                       </button>
+
+                      <span className="h-4 border-r border-slate-300 mx-1" />
+
+                      {/* Sisipkan Variabel Dropdown Tool */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const rect = docxEditorRef.current?.getBoundingClientRect() || { bottom: 200, left: 100 };
+                          setAutocomplete({
+                            isOpen: true,
+                            query: '',
+                            fieldId: 'docx_editor',
+                            cursorIndex: 0,
+                            position: { top: rect.bottom, left: Math.max(16, rect.left) },
+                            selectedIndex: 0,
+                          });
+                        }}
+                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-gradient-to-r from-purple-50 to-pink-50 hover:from-purple-100 hover:to-pink-100 text-purple-800 border border-purple-300 rounded-lg transition-colors shadow-2xs"
+                        title="Sisipkan tag variabel {{...}} ke dalam naskah"
+                      >
+                        <Variable className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Sisipkan Variabel {'{{...}}'}</span>
+                      </button>
                     </div>
                   </div>
 
@@ -1852,6 +1949,154 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                             </div>
                           </div>
                         ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* FLOATING IMAGE RESIZE & DRAG-N-DROP CONTROLS */}
+                  {selectedImg && (
+                    <div className="image-control-bar bg-white/95 backdrop-blur-md border-2 border-purple-500 rounded-2xl shadow-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs z-30 animate-in fade-in zoom-in-95 duration-150">
+                      <div className="flex items-center gap-2">
+                        <div className="w-9 h-9 bg-purple-50 rounded-lg border border-purple-200 flex items-center justify-center p-1 overflow-hidden shrink-0">
+                          <img src={selectedImg.src} alt="Thumbnail" className="max-w-full max-h-full object-contain" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-slate-800 text-xs">Atur Gambar Terpilih</span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 font-mono font-bold">
+                              {selectedImg.width}px
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-500">
+                            Resize ukuran, atur posisi, atau drag & drop ke bagian mana saja
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Resize Presets & Slider */}
+                      <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1.5 rounded-xl border border-slate-200">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Ukuran:</span>
+                        <button
+                          type="button"
+                          onClick={() => handleResizeSelectedImg(140)}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.width <= 160 ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                        >
+                          Kecil (140px)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleResizeSelectedImg(260)}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.width > 160 && selectedImg.width <= 320 ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                        >
+                          Sedang (260px)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleResizeSelectedImg(420)}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.width > 320 && selectedImg.width <= 500 ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                        >
+                          Besar (420px)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleResizeSelectedImg(680)}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.width > 500 ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                        >
+                          Penuh (100%)
+                        </button>
+                        <input
+                          type="range"
+                          min={80}
+                          max={720}
+                          value={selectedImg.width}
+                          onChange={(e) => handleResizeSelectedImg(Number(e.target.value))}
+                          className="w-20 accent-purple-600 cursor-pointer"
+                          title="Geser untuk atur lebar presisi"
+                        />
+                      </div>
+
+                      {/* Alignment Options */}
+                      <div className="flex items-center gap-1 bg-slate-50 px-2 py-1.5 rounded-xl border border-slate-200">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase mr-1">Posisi:</span>
+                        <button
+                          type="button"
+                          onClick={() => handleAlignSelectedImg('left')}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.align === 'left' ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                          title="Rata Kiri"
+                        >
+                          Kiri
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAlignSelectedImg('center')}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.align === 'center' ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                          title="Tengah"
+                        >
+                          Tengah
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAlignSelectedImg('right')}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.align === 'right' ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                          title="Rata Kanan"
+                        >
+                          Kanan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAlignSelectedImg('float-left')}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.align === 'float-left' ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                          title="Float Kiri (Teks membungkus gambar dari kanan)"
+                        >
+                          Float Kiri
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAlignSelectedImg('float-right')}
+                          className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-colors ${
+                            selectedImg.align === 'float-right' ? 'bg-purple-600 text-white' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'
+                          }`}
+                          title="Float Kanan (Teks membungkus gambar dari kiri)"
+                        >
+                          Float Kanan
+                        </button>
+                      </div>
+
+                      {/* Actions: Delete & Close */}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleDeleteSelectedImg}
+                          className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors"
+                          title="Hapus gambar ini dari naskah"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Hapus</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedImg(null)}
+                          className="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+                          title="Tutup panel pengaturan gambar"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
                       </div>
                     </div>
                   )}
@@ -1953,12 +2198,13 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                               ref={docxEditorRef}
                               contentEditable={true}
                               suppressContentEditableWarning={true}
+                              onClick={handleEditorClick}
                               onBlur={(e) => {
                                 const newHtml = e.currentTarget.innerHTML;
                                 setEditingTemplate((prev) => prev ? { ...prev, originalDocxHtml: newHtml } : null);
                               }}
-                              className="docx-document-content min-h-[750px] p-2 leading-relaxed select-text focus:outline-none focus:ring-1 focus:ring-purple-300/40 rounded transition-all cursor-text"
-                              title="Klik untuk langsung mengedit naskah dokumen sesuai format aslinya"
+                              className="docx-document-content min-h-[750px] p-2 leading-relaxed select-text focus:outline-none focus:ring-1 focus:ring-purple-300/40 rounded transition-all cursor-text relative"
+                              title="Klik untuk langsung mengedit naskah dokumen sesuai format aslinya (klik gambar untuk resize & atur letak)"
                             />
                           </div>
                         ) : (
@@ -2080,9 +2326,14 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                                         <input
                                           type="text"
                                           value={sec.title}
-                                          onChange={(e) => handleUpdateSection(globalIdx, 'title', e.target.value)}
+                                          onChange={(e) => {
+                                            handleUpdateSection(globalIdx, 'title', e.target.value);
+                                            handleInputCheckTrigger(e, `sec_title_${globalIdx}`, globalIdx);
+                                          }}
+                                          onKeyUp={(e) => handleInputCheckTrigger(e, `sec_title_${globalIdx}`, globalIdx)}
+                                          onKeyDown={handleInputKeyDown}
                                           className="flex-1 px-2 py-0.5 text-xs font-bold border border-transparent hover:border-slate-300 focus:border-purple-500 rounded bg-transparent"
-                                          placeholder="Judul Seksi"
+                                          placeholder="Judul Seksi (Ketik {{ untuk variabel)"
                                         />
                                       </div>
                                       <button
@@ -2098,10 +2349,44 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                                     <textarea
                                       rows={Math.max(2, sec.content.split('\n').length)}
                                       value={sec.content}
-                                      onChange={(e) => handleUpdateSection(globalIdx, 'content', e.target.value)}
-                                      className="w-full p-2 text-xs font-sans text-slate-800 bg-slate-50/50 hover:bg-white focus:bg-white border border-transparent hover:border-slate-200 focus:border-purple-400 rounded leading-relaxed resize-y"
-                                      placeholder="Isi standar seksi template..."
+                                      onChange={(e) => {
+                                        handleUpdateSection(globalIdx, 'content', e.target.value);
+                                        handleInputCheckTrigger(e, `sec_content_${globalIdx}`, globalIdx);
+                                      }}
+                                      onKeyUp={(e) => handleInputCheckTrigger(e, `sec_content_${globalIdx}`, globalIdx)}
+                                      onKeyDown={handleInputKeyDown}
+                                      className="w-full p-2 text-xs font-sans text-slate-800 bg-slate-50/50 hover:bg-white focus:bg-white border border-transparent hover:border-slate-200 focus:border-purple-400 rounded leading-relaxed resize-y font-mono"
+                                      placeholder="Isi standar seksi template... (Ketik {{ untuk variabel, gunakan [...] untuk perintah AI)"
                                     />
+
+                                    {/* DETEKTOR & EKSEKUTOR PROMPT AI [...] */}
+                                    {sec.content.includes('[') && sec.content.includes(']') && (
+                                      <div className="flex items-center justify-between p-2 rounded-xl bg-gradient-to-r from-fuchsia-50 to-purple-50 border border-purple-200/90 text-xs shadow-2xs">
+                                        <div className="flex items-center gap-1.5 text-purple-900 font-semibold text-[11px]">
+                                          <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                                          <span>Perintah AI [...] terdeteksi dalam tanda kurung siku</span>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          disabled={executingBracketIdx === globalIdx}
+                                          onClick={() => handleExecuteBracketPromptInTemplate(globalIdx)}
+                                          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-white bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 rounded-lg shadow-2xs transition-all active:scale-95"
+                                          title="Eksekusi seluruh perintah prompt AI di dalam tanda kurung siku [...]"
+                                        >
+                                          {executingBracketIdx === globalIdx ? (
+                                            <>
+                                              <RefreshCw className="w-3 h-3 animate-spin" />
+                                              <span>Mengeksekusi AI...</span>
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Sparkles className="w-3 h-3" />
+                                              <span>⚡ Jalankan Prompt AI [...]</span>
+                                            </>
+                                          )}
+                                        </button>
+                                      </div>
+                                    )}
                                   </div>
                                 );
                               })}
@@ -2171,8 +2456,13 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                             <input
                               type="text"
                               value={sec.title}
-                              onChange={(e) => handleUpdateSection(idx, 'title', e.target.value)}
-                              placeholder="Judul Seksi"
+                              onChange={(e) => {
+                                handleUpdateSection(idx, 'title', e.target.value);
+                                handleInputCheckTrigger(e, `sec_title_${idx}`, idx);
+                              }}
+                              onKeyUp={(e) => handleInputCheckTrigger(e, `sec_title_${idx}`, idx)}
+                              onKeyDown={handleInputKeyDown}
+                              placeholder="Judul Seksi (Ketik {{ untuk variabel)"
                               className="flex-1 px-2.5 py-1 text-xs border border-slate-300 rounded-lg font-bold bg-white"
                             />
                           </div>
@@ -2189,10 +2479,44 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                         <textarea
                           rows={3}
                           value={sec.content}
-                          onChange={(e) => handleUpdateSection(idx, 'content', e.target.value)}
-                          placeholder="Isi uraian standar atau placeholder variabel {{...}}"
+                          onChange={(e) => {
+                            handleUpdateSection(idx, 'content', e.target.value);
+                            handleInputCheckTrigger(e, `sec_content_${idx}`, idx);
+                          }}
+                          onKeyUp={(e) => handleInputCheckTrigger(e, `sec_content_${idx}`, idx)}
+                          onKeyDown={handleInputKeyDown}
+                          placeholder="Isi uraian standar atau placeholder variabel {{...}} (Gunakan [...] untuk prompt AI)"
                           className="w-full p-2.5 text-xs border border-slate-300 rounded-lg font-mono bg-white"
                         />
+
+                        {/* DETEKTOR & EKSEKUTOR PROMPT AI [...] */}
+                        {sec.content.includes('[') && sec.content.includes(']') && (
+                          <div className="flex items-center justify-between p-2 rounded-xl bg-gradient-to-r from-fuchsia-50 to-purple-50 border border-purple-200 text-xs">
+                            <div className="flex items-center gap-1.5 text-purple-900 font-semibold text-[11px]">
+                              <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                              <span>Perintah AI [...] terdeteksi dalam tanda kurung siku</span>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={executingBracketIdx === idx}
+                              onClick={() => handleExecuteBracketPromptInTemplate(idx)}
+                              className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-white bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 rounded-lg shadow-2xs transition-all active:scale-95"
+                              title="Eksekusi seluruh perintah prompt AI di dalam tanda kurung siku [...]"
+                            >
+                              {executingBracketIdx === idx ? (
+                                <>
+                                  <RefreshCw className="w-3 h-3 animate-spin" />
+                                  <span>Mengeksekusi AI...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="w-3 h-3" />
+                                  <span>⚡ Jalankan Prompt AI [...]</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2295,6 +2619,76 @@ export const TemplateManagerView: React.FC<TemplateManagerViewProps> = ({
                 Tutup
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* FLOATING VARIABLE AUTOCOMPLETE POPUP (TRIGGERS ON {{ OR {{}}) */}
+      {autocomplete.isOpen && matchingAutocompleteVariables.length > 0 && (
+        <div
+          style={{
+            position: 'fixed',
+            top: `${Math.min(window.innerHeight - 340, Math.max(10, autocomplete.position.top + 4))}px`,
+            left: `${Math.min(window.innerWidth - 340, Math.max(16, autocomplete.position.left))}px`,
+            zIndex: 99999,
+          }}
+          className="w-80 bg-white rounded-2xl shadow-2xl border-2 border-purple-500 overflow-hidden text-xs animate-in fade-in duration-150 ring-4 ring-purple-500/20 no-print"
+        >
+          <div className="bg-gradient-to-r from-purple-700 via-fuchsia-700 to-indigo-700 px-3.5 py-2 text-white flex items-center justify-between text-[11px] font-bold">
+            <span className="flex items-center gap-1.5">
+              <Variable className="w-3.5 h-3.5" />
+              Pilih Variabel ({matchingAutocompleteVariables.length})
+            </span>
+            <span className="text-[9px] font-mono opacity-80">↑↓ Pilih · Enter/Klik</span>
+          </div>
+
+          <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 p-1 bg-slate-50/50">
+            {matchingAutocompleteVariables.map((v, idx) => {
+              const isSelected = idx === autocomplete.selectedIndex;
+              return (
+                <div
+                  key={v.id}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertVariableTag(v.key);
+                  }}
+                  className={`p-2 rounded-xl cursor-pointer transition-all flex items-center justify-between gap-2 ${
+                    isSelected
+                      ? 'bg-purple-100 text-purple-900 font-semibold ring-1 ring-purple-300 shadow-2xs'
+                      : 'hover:bg-white text-slate-700'
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <span className="font-mono text-purple-700 text-xs font-bold block truncate">
+                      {`{{${v.key}}}`}
+                    </span>
+                    <span className="text-[10px] text-slate-600 block truncate">
+                      {v.label}
+                    </span>
+                    <span className="text-[10px] text-slate-400 italic block truncate">
+                      {v.value || '(kosong)'}
+                    </span>
+                  </div>
+                  <span className="shrink-0 text-[8px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-white text-purple-700 border border-purple-200 uppercase">
+                    {v.category}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="px-3 py-1.5 bg-slate-100 text-[10px] text-slate-500 flex items-center justify-between border-t border-slate-200">
+            <span>Ketik manual atau tekan <strong>Esc</strong> untuk tutup</span>
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setAutocomplete((prev) => ({ ...prev, isOpen: false }));
+              }}
+              className="text-slate-400 hover:text-slate-600 font-semibold"
+            >
+              Tutup
+            </button>
           </div>
         </div>
       )}

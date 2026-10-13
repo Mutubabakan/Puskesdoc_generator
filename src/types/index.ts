@@ -5,7 +5,8 @@ export type IlpKlaster =
   | 'KLASTER_2' // Ibu dan Anak
   | 'KLASTER_3' // Usia Dewasa dan Lanjut Usia
   | 'KLASTER_4' // Penanggulangan Penyakit Menular
-  | 'LINTAS_KLASTER'; // Farmasi, Laboratorium, Gawat Darurat
+  | 'LINTAS_KLASTER' // Farmasi, Laboratorium, Gawat Darurat
+  | 'KUSTOM'; // Klaster Kustom / Manual
 
 export interface KlasterInfo {
   id: IlpKlaster;
@@ -66,12 +67,15 @@ export interface PuskesDoc {
   docType: DocumentType;
   customTypeName?: string;
   klaster: IlpKlaster;
+  customKlasterName?: string;
   docNumber: string;
   createdAt: string;
   updatedAt: string;
   useKop: boolean;
   kopMode?: 'manual' | 'image' | 'drag_editor';
   targetPages?: number;
+  showPageNumber?: boolean;
+  pageNumberPosition?: 'bottom-right' | 'bottom-center' | 'bottom-left' | 'top-right' | 'top-center';
   sopMetadata?: SopMetadata;
   sections: DocumentSection[];
   rawFormattedText?: string;
@@ -160,7 +164,8 @@ export type DatabaseCategory =
   | 'demografi_sasaran'
   | 'surveilans_penyakit'
   | 'kinerja_keuangan'
-  | 'kustom';
+  | 'kustom'
+  | (string & {});
 
 export interface DatabaseMetric {
   key: string;       // e.g. "Cakupan K4", "Kepatuhan Hand Hygiene"
